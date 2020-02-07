@@ -1,4 +1,3 @@
-# V2
 This tool allows you to connect to HM-10 BLE module directly from Raspberry 
 PI using it's built-in Bluetooth module so you don't need the second HM-10. 
 The tool exposes this connection over a TCP socket.
@@ -15,13 +14,19 @@ echo -n "AT+PIO20" | nc -vN localhost 9000  #Set HM-10 PIO2 to low
 Or you can use TCP sockets in your program and exchange the binary data 
 with your HM-10 module.
 
+
 ## Hardware
 This utility was developed on Raspberry Pi 3B+. But I suppose it should work 
-on any Pi that has Bluetooth >=4.0 module. I used the original HM-10 BLE 
-module. You probably know about the clone of HM-10, that uses different AT 
-command set. I suppose it works the similar way but I have not tested it yet.
+on any Pi that has Bluetooth >=4.0 module. And even not only on Raspberry Pi. 
+On any Linux machine which has Bluetooth 4.0 module and uses the official Bluez 
+Bluetooth stack.
 
-## Build the tool
+Another one moment: I used the original HM-10 BLE module. You probably know 
+about the clone of HM-10, that uses different AT command set. I suppose it 
+works the similar way but I have not tested it yet.
+
+
+## Building the tool
 You should build the tool before using. First of all install required libraries:
 ```bash
 sudo apt install libglib2.0-dev

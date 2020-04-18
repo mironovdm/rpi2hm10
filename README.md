@@ -1,6 +1,6 @@
 This tool allows you to connect to HM-10 BLE module directly from Raspberry 
-PI using it's built-in Bluetooth module so you don't need the second HM-10. 
-The tool exposes this connection over a TCP socket.
+PI using it's built-in Bluetooth module so you don't need the second HM-10 
+connected to UART. The tool exposes this connection over a TCP socket.
 
 Using this tool you can, for example, easily control the state of the pins 
 of HM-10 directly from Pi terminal (note that your HM-10 should be in mode 

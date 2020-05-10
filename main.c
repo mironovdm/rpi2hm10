@@ -299,10 +299,7 @@ void start_main_loop()
     FD_SET(io_fds.srv_sock, &active_readfds);
     FD_SET(io_fds.notify_fd->fd, &active_readfds);
 
-    while (1) {
-        if (got_interp_signal)
-            break;
-        
+    while (!got_interp_signal) {
         readfds = active_readfds;
         ready = select(nfds+1, &readfds, NULL, NULL, NULL);
 

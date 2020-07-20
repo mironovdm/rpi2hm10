@@ -1,6 +1,6 @@
 /**
  * The program establishes a connection to HM-10 module and 
- * exposes it to the TCP socket.
+ * exposes it over TCP socket.
  */
 
 #include <errno.h>
@@ -438,18 +438,29 @@ void init_cmd_args(int argc, char **argv)
     cmd_args.port = (uint16_t)port;
 }
 
+void parse_args(int argc, char **argv)
+{
+    
+}
+
 /**
  * Initialize SIGINT and SIGTERM handlers.
  * Handler is the same for both signals.
  */
 void init_sig_handlers(void)
 {
-    sigaction(SIGINT, &(struct sigaction){
-            .sa_handler=sig_handler
-    }, NULL);
-    sigaction(SIGTERM, &(struct sigaction){
-            .sa_handler=sig_handler
-    }, NULL);
+    struct sigaction sig_action = {
+        .sa_handler=sig_handler
+    };
+    sigaction(SIGINT, &sig_action, NULL);
+    sigaction(SIGTERM, &sig_action, NULL);
+}
+
+void setup_application(int argc, char **argv) {
+    if (parse_args(argc, argv))
+        exit(EXIT_FAILURE);
+
+    init_sig_handlers();
 }
 
 int main(int argc, char *argv[])
@@ -457,7 +468,7 @@ int main(int argc, char *argv[])
     int status;
 
     init_cmd_args(argc, argv);
-    init_sig_handlers();
+    setup_application(argc, argv);
 
     dbus_conn.conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
     if (dbus_conn.conn == NULL) {

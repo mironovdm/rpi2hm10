@@ -10,7 +10,7 @@
 #define ARG_CHR_PATH (1<<4)
 #define ARG_RECON (1<<5)
 
-#define REQUIRED_MASK ((unsigned)(ARG_DEV_PATH | ARG_CHR_PATH))
+#define REQUIRED_ARG_MASK ((unsigned)(ARG_DEV_PATH | ARG_CHR_PATH))
 
 struct app_options {
     char *host;
@@ -21,7 +21,7 @@ struct app_options {
     unsigned arg_flags; /* Bit mask of args that were passed to program */
 };
 
-extern char *help_text;
+extern const char *help_text;
 extern struct app_options opts;
 
 int parse_args(int, char *[]);

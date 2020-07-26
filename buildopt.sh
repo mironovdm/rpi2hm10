@@ -3,7 +3,7 @@
 # Exit on first error
 set -e
 
-gcc -c \
+clang -c \
     argparse.c \
     optapp.c
-gcc argparse.o optapp.o -o optapp
+clang argparse.o optapp.o -o optapp

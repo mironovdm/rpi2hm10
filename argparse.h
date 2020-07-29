@@ -12,6 +12,8 @@
 
 #define REQUIRED_ARG_MASK ((unsigned)(ARG_DEV_PATH | ARG_CHR_PATH))
 
+#define ARG_ERR_HELP (512)
+
 struct app_options {
     char *host;
     uint16_t port;

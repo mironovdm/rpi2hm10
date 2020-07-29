@@ -45,14 +45,20 @@ static char *copy_optarg(void) {
     exit(1);
 }
 
-static void opt_handle_host()
+static int opt_handle_host(void)
 {
     opts.host = copy_optarg();
+
+    if (opts.host == NULL)
+        return -ENOMEM;
+
     opts.arg_flags |= ARG_HOST;
+
+    return 0;
 }
 
 /* TODO: convert port number with strtol */
-static int opt_handle_port()
+static int opt_handle_port(void)
 {
     unsigned long port_num = 0;
 
@@ -67,16 +73,28 @@ static int opt_handle_port()
     return 0;
 }
 
-static void opt_handle_dev_path()
+static int opt_handle_dev_path(void)
 {
     opts.dev_path = copy_optarg();
+
+    if (opts.dev_path == NULL)
+        return -ENOMEM;
+
     opts.arg_flags |= ARG_DEV_PATH;
+
+    return 0;
 }
 
-static void opt_handle_char_path()
+static int opt_handle_char_path(void)
 {
     opts.chr_path = copy_optarg();
+
+    if (opts.chr_path == NULL)
+        return -ENOMEM;
+
     opts.arg_flags |= ARG_CHR_PATH;
+
+    return 0;
 }
 
 static inline void opt_handle_reconnect(void)
@@ -94,8 +112,7 @@ static int parse_option(int opt) {
     {
         /* Host to listen on */
         case 'h':
-            opt_handle_host();
-            break;
+            return opt_handle_host();
 
         /* Port to listen on */
         case 'p':
@@ -108,17 +125,15 @@ static int parse_option(int opt) {
 
         /* Device */
         case 'd':
-            opt_handle_dev_path();
-            break;
+            return opt_handle_dev_path();
 
         /* Characteristic */
         case 'c':
-            opt_handle_char_path();
-            break;
+            return opt_handle_char_path();
 
         case 'i':
             puts(help_text);
-            exit(0);
+            return -ARG_ERR_HELP;
 
         case '?':
             fprintf(stderr, "Error: Unknown argument -%c(int value=%d)\n", (char)opt, opt);
@@ -148,7 +163,7 @@ static int parse_options(int argc, char *argv[])
 
     while ((opt = getopt_long(argc, argv, "h:p:d:c:r", long_opts, NULL)) != -1) {
         if (parse_option(opt) < 0) {
-            return -EINVAL;
+            return -1;
         }
     }
 
@@ -157,12 +172,14 @@ static int parse_options(int argc, char *argv[])
 
 int parse_args(int argc, char *argv[])
 {
-    if (parse_options(argc, argv) < 0)
-        return -EINVAL;
+    int err = parse_options(argc, argv);
+
+    if (err < 0)       
+        return err;
 
     if (!is_set_required_args()) {
         fprintf(stderr, "Error: required parameters are not defined\n");
-        return -EINVAL;
+        return -1;
     }
 
     arg_set_default();

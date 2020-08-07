@@ -1,30 +1,29 @@
-#ifndef _H_ARGEPARSE
-#define _H_ARGEPARSE
+#ifndef __H_ARGEPARSE_
+#define __H_ARGEPARSE_
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#define ARG_HOST (1<<1)
-#define ARG_PORT (1<<2)
-#define ARG_DEV_PATH (1<<3)
-#define ARG_CHR_PATH (1<<4)
-#define ARG_RECON (1<<5)
+#define ARG_VAL_REQUIRED 1
+#define ARG_NO_VAL 0
 
-#define REQUIRED_ARG_MASK ((unsigned)(ARG_DEV_PATH | ARG_CHR_PATH))
-
+/* Not an error actually, just indicates the presence of "--help" argument */
 #define ARG_ERR_HELP (512)
 
-struct app_options {
-    char *host;
+struct cmd_args {
     uint16_t port;
+    char *host;
     char *dev_path;
     char *chr_path;
-    bool reconnect;
+    int reconnect;
+    int keep_ble_con;   /* We don't have to disconnect BLE device on every exit. We can keep
+                           keep connection and use connected device on next launch */
+                        /* @TODO: check if we can use already connected device */
     unsigned arg_flags; /* Bit mask of args that were passed to program */
 };
 
 extern const char *help_text;
-extern struct app_options opts;
+extern struct cmd_args opts;
 
 int parse_args(int, char *[]);
 

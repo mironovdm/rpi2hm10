@@ -36,6 +36,7 @@ Clone this repository to some path and build it:
 ```bash
 cd /tmp
 https://github.com/mironovdm/rpi2hm10
+cd rpi2hm10
 make
 ```
 

@@ -3,6 +3,7 @@
  * exposes it over TCP socket.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -14,6 +15,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <netdb.h>
 
 #include <sys/time.h>       /* For portability [M.Kerrisk p.1331] */
 #include <sys/select.h>
@@ -22,34 +24,11 @@
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 
+#include "main.h"
+#include "argparse.h"
 
-/* Connection timeout in milliseconds */
-#define CONNECT_TIMEOUT_MS 5000
+GDBusConnection *dbus_conn;
 
-/* If 1 then HM-10 will be disconnected on exit. */
-#define CFG_DISCONNECT_ON_EXIT 0
-
-/* Command line arguments storage */
-struct {
-    char *dev_obj_path;
-    char *chr_obj_path;
-    char *host;
-    uint16_t port;
-} cmd_args;
-
-/* Connection to DBus and its status */
-struct {
-    GDBusConnection *conn;
-    int is_connected;
-} dbus_conn;
-
-/* Bluez 'AcquireNotify' file descriptor and MTU */
-struct bluez_notify_fd {
-    int fd;
-    uint16_t mtu;
-};
-
-/* FDs and sockets wich are used in the main loop */
 struct {
     struct bluez_notify_fd *notify_fd;
     int srv_sock;
@@ -60,7 +39,7 @@ struct {
  * Will be chnaged to one by signal handler. 'start_main_loop()'
  * checks it on every loop to break when SIGINT or SIGTERM is received.
  */
-int got_interp_signal = 0;
+static int got_interp_signal = 0;
 
 static int exit_val = 0;
 
@@ -70,20 +49,18 @@ const char bluez_bus_name[] = "org.bluez";
 
 void sig_handler(int signum)
 {
-    if (signum == SIGINT || signum == SIGTERM)
-	   got_interp_signal = 1;
+	got_interp_signal = 1;
 }
 
 void failure(const char *errmsg)
 {
     perror(errmsg);
-    fprintf(stderr, "errno: %d\n", errno);
+    fprintf(stderr, "errno=%d\n", errno);
     exit_val = 1;
 }
 
 /**
  * Connect to HM-10 BLE module.
- * Returns 0 on success and -1 on error.
  */
 int dev_connect(void)
 {
@@ -91,9 +68,8 @@ int dev_connect(void)
     GError *error = NULL;
 
     res = g_dbus_connection_call_sync(
-        dbus_conn.conn, bluez_bus_name, cmd_args.dev_obj_path,
-        "org.bluez.Device1", "Connect", NULL, NULL, G_DBUS_CALL_FLAGS_NONE,
-        CONNECT_TIMEOUT_MS, NULL, &error
+        dbus_conn, bluez_bus_name, opts.dev_path, "org.bluez.Device1",  "Connect", NULL, NULL, 
+        G_DBUS_CALL_FLAGS_NONE, CONNECT_TIMEOUT_MS, NULL, &error
     );
 
     if (res == NULL){
@@ -103,28 +79,26 @@ int dev_connect(void)
     }
 
     g_variant_unref(res);
-    dbus_conn.is_connected = 1;
     
     return 0;
 }
 
 /**
  * Disconnect HM-10 module.
- * Returns 0 on success and -1 on error.
  */
 int dev_disconnect(void) {
     GVariant *res;
     GError *error = NULL;
 
     res = g_dbus_connection_call_sync(
-        dbus_conn.conn, bluez_bus_name, cmd_args.dev_obj_path,
+        dbus_conn, bluez_bus_name, opts.dev_path,
         "org.bluez.Device1", "Disconnect", /* parameters */ NULL, 
         /* reply_type: */ NULL, G_DBUS_CALL_FLAGS_NONE, 
         -1, NULL, &error
     );
 
     if (res == NULL){
-        printf("ERROR: %s\n", error->message);
+        printf("Error: %s\n", error->message);
         g_error_free(error);
         return -1;
     }
@@ -167,7 +141,7 @@ int write_chr(const char * const data, size_t len)
     method = "WriteValue";
     
     res = g_dbus_connection_call_sync(
-        dbus_conn.conn, bluez_bus_name, cmd_args.chr_obj_path,
+        dbus_conn, bluez_bus_name, opts.chr_path,
         dbus_iface, method, params, 
         /* reply type */ NULL, G_DBUS_CALL_FLAGS_NONE, /* timeout */ -1, 
         /* cancellable */ NULL, &error
@@ -184,6 +158,7 @@ int write_chr(const char * const data, size_t len)
     return 0;
 }
 
+
 /*
  * Call 'AcquireNotify' on the characteristic interface to 
  * get file handler for receiving data from remote Bluetooth 
@@ -191,29 +166,25 @@ int write_chr(const char * const data, size_t len)
  */
 struct bluez_notify_fd *acquire_notify_descr(void)
 {
-    GVariantBuilder options = {0};
-    GVariant *params, *res;
-    GError *error;
-    GUnixFDList *fdlist; 
-    int fdlist_idx;
+    int fdlist_idx = 0;
+    char *dbus_iface = "org.bluez.GattCharacteristic1";
     struct bluez_notify_fd *fd_handler;
-    char *dbus_iface;
+    GVariant *res = NULL;
+    GError *error = NULL;
+    GVariantBuilder options;
+    GVariant *params;
+    GUnixFDList *fdlist = g_unix_fd_list_new();
 
-    res = NULL;
-    error = NULL;
-    fdlist = g_unix_fd_list_new();
 
     g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
     params = g_variant_new("(@a{sv})", g_variant_builder_end(&options));
-
-    dbus_iface = "org.bluez.GattCharacteristic1";
 
     /* 
      * Here we have to use 'g_dbus_connection_call_with_unix_fd_list_sync'
      * to get returned FD.
      */
     res = g_dbus_connection_call_with_unix_fd_list_sync(
-        dbus_conn.conn, bluez_bus_name, cmd_args.chr_obj_path,
+        dbus_conn, bluez_bus_name, opts.chr_path,
         dbus_iface, "AcquireNotify", params, NULL, 
         G_DBUS_CALL_FLAGS_NONE, -1, NULL, &fdlist, NULL, &error
     );
@@ -242,34 +213,64 @@ struct bluez_notify_fd *acquire_notify_descr(void)
     return fd_handler;
 }
 
-/*
- * Create non-blocking TCP listening socket.
- * Used for accepting new connection in 
- * the function 'start_main_loop'.
- */
+int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_ptr)
+{
+    int err;
+    struct sockaddr_in *addr;
+    struct addrinfo *addrinfo_res;
+    struct addrinfo addrinfo_hints = {
+        .ai_flags = AI_NUMERICSERV,     /* Service arg is a port number */
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM
+    };
+
+    err = getaddrinfo(host, port, &addrinfo_hints, &addrinfo_res);
+    if (err != 0) {
+        failure(gai_strerror(err));
+        return -1;
+    }
+
+    assert(sizeof(struct sockaddr_in) == addrinfo_res->ai_addrlen);
+    addr = malloc(addrinfo_res->ai_addrlen);
+    if (addr) {
+        memcpy(addr, addrinfo_res->ai_addr, addrinfo_res->ai_addrlen);
+        *sa_ptr = addr;
+        err = 0;
+    } else {
+        failure("Memory alocation error");
+        err = -1;
+    }
+
+    freeaddrinfo(addrinfo_res);
+
+    return err;
+}
+
 int create_noblock_srv_socket(void)
 {
-    int sock, status;
-    struct sockaddr_in addr = {0};
+    int sock;
+    int err;
+    char port_str[6] = {0};
+    struct sockaddr_in *addr;
+
+    errno = 0;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (socket < 0)
-        return sock;
+        return -1;
 
-    status = fcntl(sock, F_SETFL, O_NONBLOCK);
-    if (status < 0)
-        return status;
+    err = fcntl(sock, F_SETFL, O_NONBLOCK);
+    if (err < 0)
+        return err;
 
-    addr.sin_family = AF_INET;
-    addr.sin_port = (in_port_t)htons(cmd_args.port);
-    /* TODO: get string host name */
-    addr.sin_addr.s_addr = (in_addr_t)htonl(INADDR_LOOPBACK);
+    sprintf(port_str, "%u", (unsigned)opts.port);
+    if (fill_sockaddr(opts.host, port_str, &addr) < 0)
+        return -1;
 
-    status = bind(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr_in));
-    if (status < 0)
-        return status;
-    
-    if (listen(sock, 1) == 0)
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr_in)) < 0)
+        return -1;
+
+    if (listen(sock, /*int backlog=*/1) == 0)
         return sock;
 
     return -1;
@@ -286,7 +287,7 @@ void start_main_loop()
         goto exit;
     }
 
-    printf("Listening on %s:%d\n", cmd_args.host, cmd_args.port);
+    printf("Listening on %s:%d\n", opts.host, opts.port);
 
     nfds = MAX(io_fds.srv_sock, io_fds.notify_fd->fd);
     
@@ -410,43 +411,34 @@ exit:
         close(io_fds.client_sock);
 }
 
-void init_cmd_args(int argc, char **argv)
-{
-    long port;
+// void init_cmd_args(int argc, char **argv)
+// {
+//     long port;
 
-    if (argc < 5) {
-        fprintf(
-            stderr, 
-            "Error: wrong number of arguments\n"
-            "Command usage:\n"
-            "rpi2hm10 [HOST] [PORT] [DEVICE_OBJ_PATH] [CHARACTERISTIC_OBJ_PATH]\n"
-        );
-        exit(1);
-    }
+//     if (argc < 5) {
+//         fprintf(
+//             stderr, 
+//             "Error: wrong number of arguments\n"
+//             "Command usage:\n"
+//             "rpi2hm10 [HOST] [PORT] [DEVICE_OBJ_PATH] [CHARACTERISTIC_OBJ_PATH]\n"
+//         );
+//         exit(1);
+//     }
     
-    cmd_args.host = argv[1];
-    cmd_args.dev_obj_path = argv[3];
-    cmd_args.chr_obj_path = argv[4];
+//     cmd_args.host = argv[1];
+//     cmd_args.dev_obj_path = argv[3];
+//     cmd_args.chr_obj_path = argv[4];
 
-    errno = 0;
-    port = strtol(argv[2], NULL, 10);
-    if (errno != 0 ||  port < 1 || port > UINT16_MAX ) {
-        fprintf(stderr, "Wrong port number");
-        exit(1);
-    }
+//     errno = 0;
+//     port = strtol(argv[2], NULL, 10);
+//     if (errno != 0 ||  port < 1 || port > UINT16_MAX ) {
+//         fprintf(stderr, "Wrong port number");
+//         exit(1);
+//     }
 
-    cmd_args.port = (uint16_t)port;
-}
+//     cmd_args.port = (uint16_t)port;
+// }
 
-void parse_args(int argc, char **argv)
-{
-    
-}
-
-/**
- * Initialize SIGINT and SIGTERM handlers.
- * Handler is the same for both signals.
- */
 void init_sig_handlers(void)
 {
     struct sigaction sig_action = {
@@ -456,30 +448,73 @@ void init_sig_handlers(void)
     sigaction(SIGTERM, &sig_action, NULL);
 }
 
-void setup_application(int argc, char **argv) {
-    if (parse_args(argc, argv))
+void create_dbus_conn(void)
+{
+    GError *err = NULL;
+    char *dbus_addr = "system";
+
+    dbus_conn = g_dbus_connection_new_for_address_sync(
+        /* address= */(gchar *)dbus_addr,
+        /* flags= */G_DBUS_CONNECTION_FLAGS_NONE,
+        
+    );
+
+
+    
+
+    dbus_conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
+    if (dbus_conn == NULL) {
+        if (err != NULL)
+            fprintf(stderr, "Error: %s", error->message);
+        
+        failure("connect to DBus failed");
+        g_error_free(err);
         exit(EXIT_FAILURE);
+    }
+}
+
+static GIOStream *create_g_io_stream(void)
+{
+    GInputStream *stream = g_input
+
+    GIOStream *iostream = g_simple_io_stream_new
+}
+
+void init_app(int argc, char *argv[]) {
+    int err = parse_args(argc, argv);
+
+    if (err == -ARG_ERR_HELP)
+        exit(0);
+
+    if (err < 0)
+        exit(1);
 
     init_sig_handlers();
+    create_dbus_conn();
+}
+
+int ble_connect(void)
+{
+    int err = dev_connect();
+    if (err)
+        failure("Failed to connect to BLE device");
+
+    return err;
+}
+
+void before_exit(void)
+{
+    if (dbus_conn != NULL)
+        g_object_unref(dbus_conn);
 }
 
 int main(int argc, char *argv[])
 {
-    int status;
+    init_app(argc, argv);
 
-    init_cmd_args(argc, argv);
-    setup_application(argc, argv);
-
-    dbus_conn.conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
-    if (dbus_conn.conn == NULL) {
-        failure("connect to DBus failed");
-        goto free_and_exit;
-    }
-
-    status = dev_connect();
-    if (status < 0) {
-        failure("Error::481 ");
-        goto free_and_exit;
+    if (ble_connect() < 0) {
+        before_exit();
+        return EXIT_FAILURE;
     }
 
     /*
@@ -491,20 +526,15 @@ int main(int argc, char *argv[])
     sleep(1);
 
     io_fds.notify_fd = acquire_notify_descr();
-    if (io_fds.notify_fd == NULL) {
+    if (io_fds.notify_fd != NULL)
+        start_main_loop();
+    else
         failure("failed to get file handler");
-        goto free_and_exit;
-    }
 
-    start_main_loop();
-
-free_and_exit:
-
-    if (CFG_DISCONNECT_ON_EXIT && dbus_conn.is_connected)
+    if (!opts.keep_ble_con)
         dev_disconnect();
-    
-    if (dbus_conn.conn != NULL)
-        g_object_unref(dbus_conn.conn);
+
+    before_exit();
 
     return exit_val;
 }

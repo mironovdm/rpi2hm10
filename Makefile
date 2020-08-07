@@ -1,18 +1,20 @@
-CC=gcc
 
-# lgobject-2.0 - g_object_unref()
-# -lgio-2.0 - All IO calls: connect, disconnect and other
-
-all:
-	$(CC) -Wall main.c \
+all: argparse
+	$(CC) -Wall --std=gnu11 \
+	main.c \
+	argparse.o \
 	-I/usr/include/gio-unix-2.0 \
-	`pkg-config --cflags --libs glib-2.0` \
+	`pkg-config --cflags glib-2.0` \
+	`pkg-config --libs glib-2.0` \
 	-lgio-2.0 \
 	-lgobject-2.0 \
 	-o rpi2hm10
+
+argparse:
+	$(CC) -Wall -c -o argparse.o argparse.c
 	
 clean:
-	rm *.o a.out
+	rm *.o rpi2hm10
 
 # Help Target
 help:

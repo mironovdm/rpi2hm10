@@ -13,29 +13,29 @@ const char *help_text = ""
     "Raspberry Pi to HM-10 connector\n"
     "\n"
     "Usage:\n"
-    "rpi2hm [options] -d [dev_path] -c [chr_path]\n\n"
+    "rpi2hm [options] -d [dev_path] -c [chr_path]\n"
+    "\n"
     "Options:\n"
-    "  -d, --dev     Bluetooth device path, required. Must be in format: \n"
-    "                /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F\n"
-    "  -c, --char    BLE characteristic. Must be in format:\n"
-    "                /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
-    "  -h, --host    Host where socket connection will be exposed. Default: localhost\n"
-    "  -p, --port    TCP port. Optional. Default: 3000\n"
-    "  -r, --reconnect    Do not exit when BLE connection is losts, will try to\n"
-    "                     reconnect if there is data to send.\n";
+    "  -d, --dev                Bluetooth device path, required. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F\n"
+    "  -c, --char               BLE characteristic. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
+    "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
+    "  -p, --port               TCP port. Optional. Default: 3000\n"
+    "  -r, --reconnect          Do not exit when BLE connection is lost, will try to reconnect if there is data to send.\n"
+    "  -k, --keep-ble-con       Do not disconnect from BLE device on exit\n";
 
 static struct option long_opts[] = {
-	{"dev", 1, NULL, 'd'},
-    {"char", 1, NULL, 'c'},
-    {"host", 1, NULL, 'h'},
-    {"port", 1, NULL, 'p'},
-    {"reconnect", 0, NULL, 'r'},
-    {"help", 0, NULL, 'i'}
+	{"dev", ARG_VAL_REQUIRED, NULL, 'd'},
+    {"char", ARG_VAL_REQUIRED, NULL, 'c'},
+    {"host", ARG_VAL_REQUIRED, NULL, 'h'},
+    {"port", ARG_VAL_REQUIRED, NULL, 'p'},
+    {"reconnect", ARG_NO_VAL, NULL, 'r'},
+    {"help", ARG_NO_VAL, NULL, 'i'},
+    {"keep-ble-con", ARG_NO_VAL, NULL, 'k'}
 };
 
-struct app_options opts = {0};
-
-#define ARG_SET(flag) (opts.arg_flags & flag)
+struct cmd_args opts = {
+    .port = -1
+};
 
 static char *copy_optarg(void) {
     char *ptr = malloc(strlen(optarg) + 1);
@@ -52,8 +52,6 @@ static int opt_handle_host(void)
     if (opts.host == NULL)
         return -ENOMEM;
 
-    opts.arg_flags |= ARG_HOST;
-
     return 0;
 }
 
@@ -68,7 +66,6 @@ static int opt_handle_port(void)
         return -EINVAL;
     }
     opts.port = port_num;
-    opts.arg_flags |= ARG_PORT;
 
     return 0;
 }
@@ -80,8 +77,6 @@ static int opt_handle_dev_path(void)
     if (opts.dev_path == NULL)
         return -ENOMEM;
 
-    opts.arg_flags |= ARG_DEV_PATH;
-
     return 0;
 }
 
@@ -92,19 +87,22 @@ static int opt_handle_char_path(void)
     if (opts.chr_path == NULL)
         return -ENOMEM;
 
-    opts.arg_flags |= ARG_CHR_PATH;
-
     return 0;
 }
 
 static inline void opt_handle_reconnect(void)
 {
     opts.reconnect = 1;
-    opts.arg_flags |= ARG_RECON;
 }
 
-static inline int is_set_required_args(void) {
-    return (opts.arg_flags & REQUIRED_ARG_MASK) == REQUIRED_ARG_MASK;
+static inline int is_set_required_args(void)
+{
+    return opts.dev_path != NULL && opts.chr_path != NULL;
+}
+
+static inline void opt_handle_keep_ble_con(void)
+{
+    opts.keep_ble_con = 1;
 }
 
 static int parse_option(int opt) {
@@ -135,6 +133,10 @@ static int parse_option(int opt) {
             puts(help_text);
             return -ARG_ERR_HELP;
 
+        case 'k':
+            opt_handle_keep_ble_con();
+            break;
+
         case '?':
             fprintf(stderr, "Error: Unknown argument -%c(int value=%d)\n", (char)opt, opt);
             return -1;
@@ -148,20 +150,18 @@ static int parse_option(int opt) {
  */
 static void arg_set_default(void)
 {
-    if (!ARG_SET(ARG_HOST)) {
+    if (opts.host == NULL)
         opts.host = "localhost";
-    }
 
-    if (!ARG_SET(ARG_PORT)) {
+    if (opts.port < 0)
         opts.port = 3000;
-    }
 }
 
 static int parse_options(int argc, char *argv[])
 {
     int opt = 0;
 
-    while ((opt = getopt_long(argc, argv, "h:p:d:c:r", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "h:p:d:c:rk", long_opts, NULL)) != -1) {
         if (parse_option(opt) < 0) {
             return -1;
         }

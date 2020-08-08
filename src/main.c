@@ -448,36 +448,44 @@ void init_sig_handlers(void)
     sigaction(SIGTERM, &sig_action, NULL);
 }
 
-void create_dbus_conn(void)
+static int check_g_error(GError **err)
 {
-    GError *err = NULL;
-    char *dbus_addr = "system";
-
-    dbus_conn = g_dbus_connection_new_for_address_sync(
-        /* address= */(gchar *)dbus_addr,
-        /* flags= */G_DBUS_CONNECTION_FLAGS_NONE,
-        
-    );
-
-
+    if (*err == NULL)
+        return 0;
     
+    if ((*err)->message != NULL)
+        printf("GError: %s\n", (*err)->message);
+    else
+        printf("GError: no error message\n");
 
-    dbus_conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
-    if (dbus_conn == NULL) {
-        if (err != NULL)
-            fprintf(stderr, "Error: %s", error->message);
-        
-        failure("connect to DBus failed");
-        g_error_free(err);
-        exit(EXIT_FAILURE);
-    }
+    g_error_free(*err);
+    *err = NULL;
+
+    return -1;
 }
 
-static GIOStream *create_g_io_stream(void)
+static int create_dbus_conn(void)
 {
-    GInputStream *stream = g_input
+    GError *err = NULL;
+    gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(
+        G_BUS_TYPE_SYSTEM, NULL, &err
+    );
+    if (check_g_error(&err) < 0)
+        return -1;
 
-    GIOStream *iostream = g_simple_io_stream_new
+    dbus_conn = g_dbus_connection_new_for_address_sync(
+        sys_bus_addr_ptr, /* address */
+        G_DBUS_CONNECTION_FLAGS_NONE, /* flags */
+        NULL, /* observer */
+        NULL, /* cancelable */
+        &err
+    );
+    if (check_g_error(&err) < 0)
+        return -1;
+
+    g_object_unref(sys_bus_addr_ptr);
+
+    return 0;
 }
 
 void init_app(int argc, char *argv[]) {

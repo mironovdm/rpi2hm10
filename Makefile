@@ -1,20 +1,28 @@
+CFLAGS = -Wall --std=gnu11
 
-all: argparse
-	$(CC) -Wall --std=gnu11 \
-	main.c \
-	argparse.o \
-	-I/usr/include/gio-unix-2.0 \
-	`pkg-config --cflags glib-2.0` \
-	`pkg-config --libs glib-2.0` \
-	-lgio-2.0 \
-	-lgobject-2.0 \
-	-o rpi2hm10
+BINARY = rpi2hm10
+SRCDIR = src
 
-argparse:
-	$(CC) -Wall -c -o argparse.o argparse.c
-	
+INCLUDE_GLIB = `pkg-config --cflags glib-2.0 gio-unix-2.0`
+LIB_GLIB = `pkg-config --libs glib-2.0`
+LIB_GIO = `pkg-config --libs gio-2.0`
+
+
+.PHONY: all clean
+
+all: $(BINARY)
+
+$(BINARY): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
+	$(CC) $(CFLAGS) $? $(LIB_GLIB) $(LIB_GIO) -o $(BINARY)
+
+$(SRCDIR)/main.o: $(SRCDIR)/main.c
+	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<
+
+argparse.o: argparse.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 clean:
-	rm *.o rpi2hm10
+	rm -f $(SRCDIR)/*.o rpi2hm10
 
 # Help Target
 help:

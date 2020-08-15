@@ -1,6 +1,6 @@
 This tool allows you to connect to HM-10 BLE module directly from Raspberry 
-PI using it's built-in Bluetooth module so you don't need the second HM-10. 
-The tool exposes this connection over a TCP socket.
+PI using it's built-in Bluetooth module so you don't need the second HM-10 
+connected to UART. The tool exposes this connection over a TCP socket.
 
 Using this tool you can, for example, easily control the state of the pins 
 of HM-10 directly from Pi terminal (note that your HM-10 should be in mode 
@@ -60,8 +60,13 @@ Discovery stopped
 
 And you are ready to start the tool. Look at command below. You have to change in the same manner the part `dev_6A_75_1E_6E_E8_99` in the command below with your MAC address that you have found out earlier. Note that you need root privileges to access Bluetooth:
 ```bash
+<<<<<<< HEAD
 sudo rpi2hm10 \
 --host localhost --port 5000 \
 --dev /org/bluez/hci0/dev_6A_75_1E_6E_E8_99 \
 --char /org/bluez/hci0/dev_6A_75_1E_6E_E8_99/service0010/char0011
 ```
+=======
+sudo pi2hm10 localhost 9000 /org/bluez/hci0/dev_6A_75_1E_6E_E8_99 /org/bluez/hci0/dev_6A_75_1E_6E_E8_99/service0010/char0011
+```
+>>>>>>> master

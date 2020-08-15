@@ -27,7 +27,7 @@ works the similar way but I have not tested it yet.
 
 
 ## Building the tool
-You should build the tool before using. First of all install required libraries:
+You should build the tool before using. First of all ensure you have required libraries installed:
 ```bash
 sudo apt install libglib2.0-dev
 ```
@@ -35,7 +35,8 @@ sudo apt install libglib2.0-dev
 Clone this repository to some path and build it:
 ```bash
 cd /tmp
-https://github.com/mironovdm/rpi2hm10
+git clone https://github.com/mironovdm/rpi2hm10.git
+cd rpi2hm10
 make
 ```
 
@@ -43,7 +44,7 @@ If compilation is finished successfully then copy the compiled binary
 `rpi2hm10` to any other directory you want, for example to `/usr/local/bin`.
 
 ## How to use
-At first you need to know MAC address of your HM-10 module. You can use `bluetoothctl` tool on your Pi for that. Power up your HM-10, start `bluetoothctl` and enable scaning. During the scan you may see several devices, one of them should be called "HMSoft" - it is default name for HM-10:
+At first you need to know MAC address of your HM-10 module. You can use `bluetoothctl` tool on your Pi for that purpose. Power up your HM-10, start `bluetoothctl` and enable scaning. During the scan you may see several devices, one of them should be called "HMSoft" - it is a default name for HM-10:
 ```
 pi@raspberrypi:~ $ sudo bluetoothctl
 Agent registered
@@ -57,7 +58,15 @@ Now disable the scan:
 Discovery stopped
 ```
 
-And you are ready to start the tool. Look at command below. You have to change in the same manner the part `dev_6A_75_1E_6E_E8_99` in the command with your MAC that you have found out earlier :
+And you are ready to start the tool. Look at command below. You have to change in the same manner the part `dev_6A_75_1E_6E_E8_99` in the command below with your MAC address that you have found out earlier. Note that you need root privileges to access Bluetooth:
 ```bash
+<<<<<<< HEAD
+sudo rpi2hm10 \
+--host localhost --port 5000 \
+--dev /org/bluez/hci0/dev_6A_75_1E_6E_E8_99 \
+--char /org/bluez/hci0/dev_6A_75_1E_6E_E8_99/service0010/char0011
+```
+=======
 sudo pi2hm10 localhost 9000 /org/bluez/hci0/dev_6A_75_1E_6E_E8_99 /org/bluez/hci0/dev_6A_75_1E_6E_E8_99/service0010/char0011
 ```
+>>>>>>> master

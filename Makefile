@@ -1,18 +1,28 @@
-CC=gcc
+CFLAGS = -Wall --std=gnu11
 
-# lgobject-2.0 - g_object_unref()
-# -lgio-2.0 - All IO calls: connect, disconnect and other
+BINARY = rpi2hm10
+SRCDIR = src
 
-all:
-	$(CC) -Wall main.c \
-	-I/usr/include/gio-unix-2.0 \
-	`pkg-config --cflags --libs glib-2.0` \
-	-lgio-2.0 \
-	-lgobject-2.0 \
-	-o rpi2hm10
-	
+INCLUDE_GLIB = `pkg-config --cflags glib-2.0 gio-unix-2.0`
+LIB_GLIB = `pkg-config --libs glib-2.0`
+LIB_GIO = `pkg-config --libs gio-2.0`
+
+
+.PHONY: all clean
+
+all: $(BINARY)
+
+$(BINARY): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
+	$(CC) $(CFLAGS) $^ $(LIB_GLIB) $(LIB_GIO) -o $(BINARY)
+
+$(SRCDIR)/main.o: $(SRCDIR)/main.c
+	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<
+
+argparse.o: argparse.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 clean:
-	rm *.o a.out
+	rm -f $(SRCDIR)/*.o rpi2hm10
 
 # Help Target
 help:

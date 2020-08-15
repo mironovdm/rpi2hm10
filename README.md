@@ -27,7 +27,7 @@ works the similar way but I have not tested it yet.
 
 
 ## Building the tool
-You should build the tool before using. First of all install required libraries:
+You should build the tool before using. First of all ensure you have required libraries installed:
 ```bash
 sudo apt install libglib2.0-dev
 ```
@@ -35,7 +35,7 @@ sudo apt install libglib2.0-dev
 Clone this repository to some path and build it:
 ```bash
 cd /tmp
-https://github.com/mironovdm/rpi2hm10
+git clone https://github.com/mironovdm/rpi2hm10.git
 cd rpi2hm10
 make
 ```

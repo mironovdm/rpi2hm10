@@ -13,7 +13,7 @@ LIB_GIO = `pkg-config --libs gio-2.0`
 all: $(BINARY)
 
 $(BINARY): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
-	$(CC) $(CFLAGS) $? $(LIB_GLIB) $(LIB_GIO) -o $(BINARY)
+	$(CC) $(CFLAGS) $^ $(LIB_GLIB) $(LIB_GIO) -o $(BINARY)
 
 $(SRCDIR)/main.o: $(SRCDIR)/main.c
 	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<

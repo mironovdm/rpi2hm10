@@ -28,9 +28,9 @@ static struct option long_opts[] = {
     {"char", ARG_VAL_REQUIRED, NULL, 'c'},
     {"host", ARG_VAL_REQUIRED, NULL, 'h'},
     {"port", ARG_VAL_REQUIRED, NULL, 'p'},
-    {"reconnect", ARG_NO_VAL, NULL, 'r'},
-    {"help", ARG_NO_VAL, NULL, 'i'},
-    {"keep-ble-con", ARG_NO_VAL, NULL, 'k'}
+    {"reconnect", ARG_FLAG, NULL, 'r'},
+    {"help", ARG_FLAG, NULL, 'i'},
+    {"keep-ble-con", ARG_FLAG, NULL, 'k'}
 };
 
 struct cmd_args opts = {

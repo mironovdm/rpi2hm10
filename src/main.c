@@ -1,6 +1,9 @@
 /**
  * The program establishes a connection to HM-10 module and 
  * exposes it over TCP socket.
+ * 
+ * TODO: connect/send/exit mode
+ * 
  */
 
 #include <assert.h>

@@ -20,7 +20,6 @@ const char *help_text = ""
     "  -c, --char               BLE characteristic. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
     "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
     "  -p, --port               TCP port. Optional. Default: 3000\n"
-    "  -r, --reconnect          Do not exit when BLE connection is lost, will try to reconnect if there is data to send.\n"
     "  -k, --keep-ble-con       Do not disconnect from BLE device on exit\n";
 
 static struct option long_opts[] = {
@@ -28,7 +27,6 @@ static struct option long_opts[] = {
     {"char", ARG_VAL_REQUIRED, NULL, 'c'},
     {"host", ARG_VAL_REQUIRED, NULL, 'h'},
     {"port", ARG_VAL_REQUIRED, NULL, 'p'},
-    {"reconnect", ARG_FLAG, NULL, 'r'},
     {"help", ARG_FLAG, NULL, 'i'},
     {"keep-ble-con", ARG_FLAG, NULL, 'k'}
 };
@@ -90,11 +88,6 @@ static int opt_handle_char_path(void)
     return 0;
 }
 
-static inline void opt_handle_reconnect(void)
-{
-    opts.reconnect = 1;
-}
-
 static inline int is_set_required_args(void)
 {
     return opts.dev_path != NULL && opts.chr_path != NULL;
@@ -115,11 +108,6 @@ static int parse_option(int opt) {
         /* Port to listen on */
         case 'p':
             return opt_handle_port();
-
-        /* Reconnection mode */
-        case 'r':
-            opt_handle_reconnect();
-            break;
 
         /* Device */
         case 'd':

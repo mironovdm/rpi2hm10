@@ -20,17 +20,27 @@ const char *help_text = ""
     "  -c, --char               BLE characteristic. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
     "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
     "  -p, --port               TCP port. Optional. Default: 3000\n"
-    "  -r, --reconnect          Do not exit when BLE connection is lost, will try to reconnect if there is data to send.\n"
+    "  -r, --reconnect          Do not exit when BLE connection is lost and try to reconnect if there is data to send.\n"
     "  -k, --keep-ble-con       Do not disconnect from BLE device on exit\n";
 
+
+/*
+ * struct option:
+ *  name - long name
+ *  arg - 0: no arg, 1: required, 2: optional
+ *  flag - if NULL getopt_long() return 0, else pointer to variable 
+ *         into wich getopt_long() will write val
+ *  val - value to return if option is set
+ */
 static struct option long_opts[] = {
-	{"dev", ARG_VAL_REQUIRED, NULL, 'd'},
-    {"char", ARG_VAL_REQUIRED, NULL, 'c'},
-    {"host", ARG_VAL_REQUIRED, NULL, 'h'},
-    {"port", ARG_VAL_REQUIRED, NULL, 'p'},
-    {"reconnect", ARG_FLAG, NULL, 'r'},
-    {"help", ARG_FLAG, NULL, 'i'},
-    {"keep-ble-con", ARG_FLAG, NULL, 'k'}
+	{"dev", required_argument, NULL, 'd'},
+    {"char", required_argument, NULL, 'c'},
+    {"host", required_argument, NULL, 'h'},
+    {"port", required_argument, NULL, 'p'},
+    {"reconnect", no_argument, NULL, 'r'},
+    {"help", no_argument, NULL, 'i'},
+    {"keep-ble-con", no_argument, NULL, 'k'},
+    {0} /* Last element should be filled with zeros */
 };
 
 struct cmd_args opts = {

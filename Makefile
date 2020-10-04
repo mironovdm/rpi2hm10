@@ -18,11 +18,11 @@ $(BINARY): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
 $(SRCDIR)/main.o: $(SRCDIR)/main.c
 	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<
 
-argparse.o: argparse.c
+$(SRCDIR)/argparse.o: $(SRCDIR)/argparse.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(SRCDIR)/*.o rpi2hm10
+	rm -f $(SRCDIR)/*.o ./*.o rpi2hm10
 
 # Help Target
 help:

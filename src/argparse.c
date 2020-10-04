@@ -44,7 +44,7 @@ static struct option long_opts[] = {
 };
 
 struct cmd_args opts = {
-    .port = -1
+    .port = 0
 };
 
 static char *copy_optarg(void) {
@@ -72,10 +72,10 @@ static int opt_handle_port(void)
 
     sscanf(optarg, "%lu", &port_num);
     if (port_num >= UINT16_MAX || port_num == 0) {
-        fprintf(stderr, "Error: invalid port number\n");
+        fprintf(stderr, "Error: invalid port number %lu\n", port_num);
         return -EINVAL;
     }
-    opts.port = port_num;
+    opts.port = (uint16_t)port_num;
 
     return 0;
 }

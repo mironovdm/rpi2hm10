@@ -17,6 +17,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <netdb.h>
 
@@ -279,10 +280,28 @@ int create_noblock_srv_socket(void)
     return -1;
 }
 
+void set_client_sock_opts(int sock)
+{
+    int one = 1;
+    int err = fcntl(sock, F_SETFL, O_NONBLOCK);
+    if (err < 0) {
+        failure("failed to set client sock non block");
+        return;
+    }
+
+    /* We operate on small chunks of data. Disable
+     * Nagle algorithm to decrease the latency.
+     */
+    err = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    if (err) {
+        failure("Could not set TCP_NODELAY");
+    }
+}
+
 void start_main_loop()
 {
     fd_set readfds, active_readfds;
-    int nfds, ready;
+    int nfds, err;
 
     io_fds.srv_sock = create_noblock_srv_socket();
     if (io_fds.srv_sock < 0) {
@@ -305,9 +324,9 @@ void start_main_loop()
 
     while (!got_interp_signal) {
         readfds = active_readfds;
-        ready = select(nfds+1, &readfds, NULL, NULL, NULL);
+        err = select(nfds+1, &readfds, NULL, NULL, NULL);
 
-        if (ready < 0) {
+        if (err < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             
@@ -315,9 +334,10 @@ void start_main_loop()
             break;
         }
         
-        if (ready == 0)
+        if (err == 0)
             continue;
 
+        /* Check and read client socket */
         if (io_fds.client_sock && FD_ISSET(io_fds.client_sock, &readfds)) {
             int len;
             int buf_size = io_fds.notify_fd->mtu;
@@ -345,6 +365,7 @@ void start_main_loop()
             }
         }
 
+        /* Accepting new client connection */
         if (FD_ISSET(io_fds.srv_sock, &readfds)) {
             int accepted_sock = accept(io_fds.srv_sock, NULL, NULL);
             if (accepted_sock < 0) {
@@ -353,18 +374,15 @@ void start_main_loop()
             }
 
             if (!io_fds.client_sock) {
-                int status = fcntl(accepted_sock, F_SETFL, O_NONBLOCK);
-                if (status < 0) {
-                    failure("failed to set client sock non block");
+                set_client_sock_opts(accepted_sock);
+                nfds = MAX(accepted_sock, nfds);
+                if (nfds > FD_SETSIZE) {
+                    failure("Socket number reached limit");
                     break;
                 }
-                
-                nfds = accepted_sock < nfds ? nfds : accepted_sock;
                 FD_SET(accepted_sock, &active_readfds);
                 io_fds.client_sock = accepted_sock;
-            }
-            else {
-                /* Maybe would be better to set backlog to zero? */
+            } else {
                 close(accepted_sock);
             }
         }
@@ -501,15 +519,6 @@ void init_app(int argc, char *argv[]) {
     create_dbus_conn();
 }
 
-int ble_connect(void)
-{
-    int err = dev_connect();
-    if (err)
-        failure("Failed to connect to BLE device");
-
-    return err;
-}
-
 void before_exit(void)
 {
     if (dbus_conn != NULL)
@@ -520,7 +529,8 @@ int main(int argc, char *argv[])
 {
     init_app(argc, argv);
 
-    if (ble_connect() < 0) {
+    if (dev_connect() < 0) {
+        failure("failed to connect to BLE device");
         before_exit();
         return EXIT_FAILURE;
     }
@@ -529,7 +539,7 @@ int main(int argc, char *argv[])
      * Need to give some time to Bluez to discover services and 
      * initialize internal structures in the case when connection
      * has not yet been established. This is very simplified way 
-     * and it needs to change this.
+     * and it needs to change this to some reliable.
      */
     sleep(1);
 

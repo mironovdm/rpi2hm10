@@ -21,7 +21,7 @@ const char *help_text = ""
     "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
     "  -p, --port               TCP port. Optional. Default: 3000\n"
     "  -r, --reconnect          Do not exit when BLE connection is lost and try to reconnect if there is data to send.\n"
-    "  -k, --keep-ble-con       Do not disconnect from BLE device on exit\n";
+    "  -k, --keep-ble-con       Do not disconnect BLE device on exit\n";
 
 
 /*
@@ -139,10 +139,12 @@ static int parse_option(int opt) {
         case 'c':
             return opt_handle_char_path();
 
+        /* Help */
         case 'i':
             puts(help_text);
             return -ARG_ERR_HELP;
 
+        /* Keep BLE connection */
         case 'k':
             opt_handle_keep_ble_con();
             break;

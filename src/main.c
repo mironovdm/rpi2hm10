@@ -485,11 +485,11 @@ static int check_g_error(GError **err)
 static int create_dbus_conn(void)
 {
     GError *err = NULL;
-    gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(
-        G_BUS_TYPE_SYSTEM, NULL, &err
-    );
+    gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
     if (check_g_error(&err) < 0)
         return -1;
+
+    printf("dbus system bus %s\n", sys_bus_addr_ptr);
 
     dbus_conn = g_dbus_connection_new_for_address_sync(
         sys_bus_addr_ptr, /* address */
@@ -501,7 +501,10 @@ static int create_dbus_conn(void)
     if (check_g_error(&err) < 0)
         return -1;
 
-    g_object_unref(sys_bus_addr_ptr);
+    if (sys_bus_addr_ptr != NULL)
+        puts("sys_bus_addr_ptr is not NULL");
+    
+    g_free(sys_bus_addr_ptr);
 
     return 0;
 }

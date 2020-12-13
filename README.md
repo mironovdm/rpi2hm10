@@ -21,10 +21,10 @@ on any Pi that has Bluetooth >=4.0 module. And even not only on Raspberry Pi.
 On any Linux machine which has Bluetooth 4.0 module and uses the official Bluez 
 Bluetooth stack.
 
-Another one moment: I used the original HM-10 BLE module. You probably know 
-about the clone of HM-10, that uses different AT command set. I suppose it 
-works the similar way but I have not tested it yet.
-
+You can use original HM-10 modules made by Jinan Huamao as well as HM-10 clones
+wich use another AT-command set, but the same principal of exposing serial 
+connection. Clone just use another BLE service and characteristic identifiers. 
+See more about this in the section __How to use__.
 
 ## Building the tool
 You should build the tool before using. First of all ensure you have required libraries installed:
@@ -65,3 +65,7 @@ sudo rpi2hm10 \
 --dev /org/bluez/hci0/dev_6A_75_1E_6E_E8_99 \
 --char /org/bluez/hci0/dev_6A_75_1E_6E_E8_99/service0010/char0011
 ```
+
+#### HM-10 clone
+For HM-10 clone you should use another service and characteristic: replace
+`service0010/char0011` in the --char command argument with `service0023/char0024`.

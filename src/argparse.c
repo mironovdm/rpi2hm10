@@ -20,7 +20,7 @@ const char *help_text = ""
     "  -c, --char               BLE characteristic. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
     "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
     "  -p, --port               TCP port. Optional. Default: 3000\n"
-    "  -k, --keep-ble-con       Do not disconnect from BLE device on exit\n";
+    "  -k, --keep-ble-con       Do not disconnect BLE device on exit\n";
 
 static struct option long_opts[] = {
 	{"dev", ARG_VAL_REQUIRED, NULL, 'd'},
@@ -117,10 +117,12 @@ static int parse_option(int opt) {
         case 'c':
             return opt_handle_char_path();
 
+        /* Help */
         case 'i':
             puts(help_text);
             return -ARG_ERR_HELP;
 
+        /* Keep BLE connection */
         case 'k':
             opt_handle_keep_ble_con();
             break;

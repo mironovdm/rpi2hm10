@@ -1,6 +1,9 @@
 /**
  * The program establishes a connection to HM-10 module and 
  * exposes it over TCP socket.
+ * 
+ * TODO: connect/send/exit mode
+ * 
  */
 
 #include <assert.h>
@@ -14,6 +17,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <netdb.h>
 
@@ -29,11 +33,12 @@
 
 GDBusConnection *dbus_conn;
 
-struct {
+struct io_info {
     struct bluez_notify_fd *notify_fd;
     int srv_sock;
     int client_sock;
-} io_fds;
+    struct sockaddr_in *addr;
+} io_data;
 
 /* 
  * Will be chnaged to one by signal handler. 'start_main_loop()'
@@ -73,12 +78,14 @@ int dev_connect(void)
     );
 
     if (res == NULL){
-        fprintf(stderr, "ERROR: %s\n", error->message);
+        fprintf(stderr, "D-BUS error: %s\n", error->message);
         g_error_free(error);
         return -1;
     }
 
     g_variant_unref(res);
+
+    printf("Device %s connected\n", opts.dev_path);
     
     return 0;
 }
@@ -246,17 +253,15 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
     return err;
 }
 
-int create_noblock_srv_socket(void)
+int create_noblock_srv_socket(struct io_info *io_info_ptr)
 {
     int sock;
     int err;
     char port_str[6] = {0};
-    struct sockaddr_in *addr;
-
-    errno = 0;
+    struct sockaddr_in *addr = NULL;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket < 0)
+    if (sock < 0)
         return -1;
 
     err = fcntl(sock, F_SETFL, O_NONBLOCK);
@@ -264,32 +269,69 @@ int create_noblock_srv_socket(void)
         return err;
 
     sprintf(port_str, "%u", (unsigned)opts.port);
-    if (fill_sockaddr(opts.host, port_str, &addr) < 0)
+    if (fill_sockaddr(opts.host, port_str, &addr) < 0) {
+        fprintf(stderr, "Name resolve error");
+        return 1;
+    }
+
+    if (bind(sock, (struct sockaddr *)addr, sizeof(struct sockaddr_in)) < 0) {
+        fprintf(stderr, "Socket bind failed\n");
         return -1;
+    }
 
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr_in)) < 0)
+    if (listen(sock, /*int backlog=*/1) < 0) {
+        fprintf(stderr, "Socket lsiten failed\n");
         return -1;
+    }
 
-    if (listen(sock, /*int backlog=*/1) == 0)
-        return sock;
+    io_info_ptr->srv_sock = sock;
+    io_info_ptr->addr = addr;
 
-    return -1;
+    return 0;
 }
 
-void start_main_loop()
+void set_client_sock_opts(int sock)
+{
+    int one = 1;
+    int err = fcntl(sock, F_SETFL, O_NONBLOCK);
+    if (err < 0) {
+        failure("Failed to set client socket as non blocking");
+        return;
+    }
+
+    /* We operate on small chunks of data. Disable
+     * Nagle algorithm to decrease the latency.
+     */
+    err = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    if (err) {
+        failure("Could not set TCP_NODELAY");
+    }
+}
+
+void socket_listening_report(struct io_info *io_info_p) {
+    char *host_name = inet_ntoa(io_info_p->addr->sin_addr);
+    if (!host_name) {
+        host_name = opts.host;
+    }
+
+    unsigned port = ntohs(io_info_p->addr->sin_port);
+
+    printf("Listening on %s:%u\n", host_name, port);
+}
+
+void start_main_loop(struct io_info *io_info_p)
 {
     fd_set readfds, active_readfds;
-    int nfds, ready;
+    int nfds, err;
 
-    io_fds.srv_sock = create_noblock_srv_socket();
-    if (io_fds.srv_sock < 0) {
-        failure("create stream socket error");
+    if (create_noblock_srv_socket(io_info_p) < 0) {
+        failure("Socket error");
         goto exit;
     }
 
-    printf("Listening on %s:%d\n", opts.host, opts.port);
+    socket_listening_report(io_info_p);
 
-    nfds = MAX(io_fds.srv_sock, io_fds.notify_fd->fd);
+    nfds = MAX(io_info_p->srv_sock, io_info_p->notify_fd->fd);
     
     if (nfds > FD_SETSIZE) {
         failure("fd is greater than FD_SETSIZE");
@@ -297,14 +339,14 @@ void start_main_loop()
     }
 
     FD_ZERO(&active_readfds);
-    FD_SET(io_fds.srv_sock, &active_readfds);
-    FD_SET(io_fds.notify_fd->fd, &active_readfds);
+    FD_SET(io_info_p->srv_sock, &active_readfds);
+    FD_SET(io_info_p->notify_fd->fd, &active_readfds);
 
     while (!got_interp_signal) {
         readfds = active_readfds;
-        ready = select(nfds+1, &readfds, NULL, NULL, NULL);
+        err = select(nfds+1, &readfds, NULL, NULL, NULL);
 
-        if (ready < 0) {
+        if (err < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             
@@ -312,17 +354,18 @@ void start_main_loop()
             break;
         }
         
-        if (ready == 0)
+        if (err == 0)
             continue;
 
-        if (io_fds.client_sock && FD_ISSET(io_fds.client_sock, &readfds)) {
+        /* Check and read client socket */
+        if (io_info_p->client_sock && FD_ISSET(io_info_p->client_sock, &readfds)) {
             int len;
-            int buf_size = io_fds.notify_fd->mtu;
+            int buf_size = io_info_p->notify_fd->mtu;
             char buf[buf_size];
 
             memset(buf, 0, buf_size);
             
-            len = recv(io_fds.client_sock, buf, buf_size, 0);
+            len = recv(io_info_p->client_sock, buf, buf_size, 0);
 
             if (len < 0) {
                 failure("notify data read error");
@@ -335,45 +378,43 @@ void start_main_loop()
                     break;
                 }
             } else {
-                FD_CLR(io_fds.client_sock, &active_readfds);
-                nfds = MAX(io_fds.srv_sock, io_fds.notify_fd->fd);
-                close(io_fds.client_sock);
-                io_fds.client_sock = 0;
+                FD_CLR(io_info_p->client_sock, &active_readfds);
+                nfds = MAX(io_info_p->srv_sock, io_info_p->notify_fd->fd);
+                close(io_info_p->client_sock);
+                io_info_p->client_sock = 0;
             }
         }
 
-        if (FD_ISSET(io_fds.srv_sock, &readfds)) {
-            int accepted_sock = accept(io_fds.srv_sock, NULL, NULL);
+        /* Accepting new client connection */
+        if (FD_ISSET(io_info_p->srv_sock, &readfds)) {
+            int accepted_sock = accept(io_info_p->srv_sock, NULL, NULL);
             if (accepted_sock < 0) {
                 failure("accept() error");
                 break;
             }
 
-            if (!io_fds.client_sock) {
-                int status = fcntl(accepted_sock, F_SETFL, O_NONBLOCK);
-                if (status < 0) {
-                    failure("failed to set client sock non block");
+            if (!io_info_p->client_sock) {
+                set_client_sock_opts(accepted_sock);
+                nfds = MAX(accepted_sock, nfds);
+                if (nfds > FD_SETSIZE) {
+                    failure("Socket number reached limit");
                     break;
                 }
-                
-                nfds = accepted_sock < nfds ? nfds : accepted_sock;
                 FD_SET(accepted_sock, &active_readfds);
-                io_fds.client_sock = accepted_sock;
-            }
-            else {
-                /* Maybe would be better to set backlog to zero? */
+                io_info_p->client_sock = accepted_sock;
+            } else {
                 close(accepted_sock);
             }
         }
 
-        if (FD_ISSET(io_fds.notify_fd->fd, &readfds)) {
+        if (FD_ISSET(io_info_p->notify_fd->fd, &readfds)) {
             ssize_t len;
-            int buf_size = io_fds.notify_fd->mtu;
+            int buf_size = io_info_p->notify_fd->mtu;
             char buf[buf_size];
 
             memset(buf, 0, buf_size);
 
-            len = read(io_fds.notify_fd->fd, buf, (size_t)buf_size);
+            len = read(io_info_p->notify_fd->fd, buf, (size_t)buf_size);
 
             if (len < 0) {
                 failure("notify data read error");
@@ -386,8 +427,8 @@ void start_main_loop()
                 break;
             }
 
-            if (io_fds.client_sock) {
-                len = send(io_fds.client_sock, buf, len, 0);
+            if (io_info_p->client_sock) {
+                len = send(io_info_p->client_sock, buf, len, 0);
                 if (len < 0) {
                     failure("send to socket failed\n");
                     break;
@@ -399,13 +440,13 @@ void start_main_loop()
 
 exit:
 
-    close(io_fds.notify_fd->fd);
+    close(io_info_p->notify_fd->fd);
 
-    if (io_fds.srv_sock > 0)
-        close(io_fds.srv_sock);
+    if (io_info_p->srv_sock > 0)
+        close(io_info_p->srv_sock);
 
-    if (io_fds.client_sock > 0)
-        close(io_fds.client_sock);
+    if (io_info_p->client_sock > 0)
+        close(io_info_p->client_sock);
 }
 
 // void init_cmd_args(int argc, char **argv)
@@ -445,15 +486,21 @@ void init_sig_handlers(void)
     sigaction(SIGTERM, &sig_action, NULL);
 }
 
-static int check_g_error(GError **err)
+static int g_error_handle(GError **err, const char *msg)
 {
+    const char *empty = "";
+
     if (*err == NULL)
         return 0;
+
+    if (!msg) {
+        msg = empty;
+    }
     
     if ((*err)->message != NULL)
-        printf("GError: %s\n", (*err)->message);
+        printf("GError: %s, %s\n", msg, (*err)->message);
     else
-        printf("GError: no error message\n");
+        printf("GError: %s, no error message\n", msg);
 
     g_error_free(*err);
     *err = NULL;
@@ -464,20 +511,24 @@ static int check_g_error(GError **err)
 static int create_dbus_conn(void)
 {
     GError *err = NULL;
+
     gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
-    if (check_g_error(&err) < 0)
-        return -1;
+    if (!sys_bus_addr_ptr) {
+        return g_error_handle(&err, "D-BUS bus address resolve failed");
+    }
 
     dbus_conn = g_dbus_connection_new_for_address_sync(
         sys_bus_addr_ptr, /* address */
-        G_DBUS_CONNECTION_FLAGS_NONE, /* flags */
+        G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT
+        | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION, /* flags */
         NULL, /* observer */
         NULL, /* cancelable */
         &err
     );
-    if (check_g_error(&err) < 0)
-        return -1;
-    
+    if (!dbus_conn) {
+        return g_error_handle(&err, "D-BUS connection failed");
+    }
+
     g_free(sys_bus_addr_ptr);
 
     return 0;
@@ -493,16 +544,9 @@ void init_app(int argc, char *argv[]) {
         exit(1);
 
     init_sig_handlers();
-    create_dbus_conn();
-}
 
-int ble_connect(void)
-{
-    int err = dev_connect();
-    if (err)
-        failure("Failed to connect to BLE device");
-
-    return err;
+    if (create_dbus_conn() < 0)
+        exit(1);
 }
 
 void before_exit(void)
@@ -515,7 +559,9 @@ int main(int argc, char *argv[])
 {
     init_app(argc, argv);
 
-    if (ble_connect() < 0) {
+    if (dev_connect() < 0) {
+        errno = 0;
+        failure("failed to connect to BLE device");
         before_exit();
         return EXIT_FAILURE;
     }
@@ -524,13 +570,13 @@ int main(int argc, char *argv[])
      * Need to give some time to Bluez to discover services and 
      * initialize internal structures in the case when connection
      * has not yet been established. This is very simplified way 
-     * and it needs to change this.
+     * and it needs to change this to some reliable.
      */
     sleep(1);
 
-    io_fds.notify_fd = acquire_notify_descr();
-    if (io_fds.notify_fd != NULL)
-        start_main_loop();
+    io_data.notify_fd = acquire_notify_descr();
+    if (io_data.notify_fd != NULL)
+        start_main_loop(&io_data);
     else
         failure("failed to get file handler");
 

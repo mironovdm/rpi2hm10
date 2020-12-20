@@ -4,9 +4,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define ARG_VAL_REQUIRED 1
-#define ARG_FLAG 0
-
 /* Not an error actually, just indicates the presence of "--help" argument */
 #define ARG_ERR_HELP 512
 

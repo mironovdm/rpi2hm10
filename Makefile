@@ -1,4 +1,4 @@
-CFLAGS = -Wall --std=gnu11 -pedantic -g 
+CFLAGS = -Wall --std=gnu11 -pedantic
 
 BINARY = rpi2hm10
 SRCDIR = src

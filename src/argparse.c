@@ -20,7 +20,7 @@ const char *help_text = ""
     "  -c, --char               BLE characteristic. Must be in format: /org/bluez/hci0/dev_1A_2B_3C_4D_5E_6F/service0010/char0011\n"
     "  -h, --host               Host where socket connection will be exposed. Default: localhost\n"
     "  -p, --port               TCP port. Optional. Default: 3000\n"
-    // "  -r, --reconnect          Do not exit when BLE connection is lost and try to reconnect if there is data to send.\n"
+    "  -r, --reconnect          Do not exit when BLE connection is lost and try to reconnect if there is data to send.\n"
     "  -k, --keep-ble-con       Do not disconnect BLE device on exit\n";
 
 
@@ -142,7 +142,7 @@ static int parse_option(int opt) {
         /* Help */
         case 'i':
             puts(help_text);
-            return -ARG_ERR_HELP;
+            return -ARG_HELP;
 
         /* Keep BLE connection */
         case 'k':

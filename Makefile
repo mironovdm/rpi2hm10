@@ -1,6 +1,6 @@
 CFLAGS = -Wall --std=gnu11 -pedantic
 
-BINARY = rpi2hm10
+TARGET = rpi2hm10
 SRCDIR = src
 
 INCLUDE_GLIB = `pkg-config --cflags glib-2.0 gio-unix-2.0`
@@ -10,10 +10,10 @@ LIB_GIO = `pkg-config --libs gio-2.0`
 
 .PHONY: all clean
 
-all: $(BINARY)
+all: $(TARGET)
 
-$(BINARY): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
-	$(CC) $(CFLAGS) $^ $(LIB_GLIB) $(LIB_GIO) -o $(BINARY)
+$(TARGET): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
+	$(CC) $(CFLAGS) $^ $(LIB_GLIB) $(LIB_GIO) -o $(TARGET)
 
 $(SRCDIR)/main.o: $(SRCDIR)/main.c
 	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<

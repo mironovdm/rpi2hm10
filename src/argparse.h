@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /* Not an error actually, just indicates the presence of "--help" argument */
-#define ARG_ERR_HELP (512)
+#define ARG_HELP (512)
 
 struct cmd_args {
     uint16_t port;
@@ -20,8 +20,7 @@ struct cmd_args {
 };
 
 extern const char *help_text;
-extern struct cmd_args opts;
 
-int parse_args(int, char *[]);
+int parse_args(int, char *[static 1]);
 
 #endif /* end _H_ARGEPARSE */

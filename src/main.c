@@ -33,12 +33,16 @@
 
 GDBusConnection *dbus_conn;
 
-struct io_info {
+typedef struct app AppState;
+
+struct app {
     struct bluez_notify_fd *notify_fd;
-    int srv_sock;
+    int server_sock;
     int client_sock;
     struct sockaddr_in *addr;
-} io_data;
+} app;
+
+extern struct cmd_args opts;
 
 /* 
  * Will be chnaged to one by signal handler. 'start_main_loop()'
@@ -118,7 +122,7 @@ int dev_disconnect(void) {
 /* 
  * Write data to HM-10 characteristic.
  */
-int write_chr(const char * const data, size_t len)
+int ble_write_chr(const char * const data, size_t len)
 {
     GVariantBuilder options_builder;
     GVariant *params, *val, *options;
@@ -226,7 +230,7 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
     struct sockaddr_in *addr;
     struct addrinfo *addrinfo_res;
     struct addrinfo addrinfo_hints = {
-        .ai_flags = AI_NUMERICSERV,     /* Service arg is a port number */
+        .ai_flags = AI_NUMERICSERV,
         .ai_family = AF_INET,
         .ai_socktype = SOCK_STREAM
     };
@@ -244,7 +248,7 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
         *sa_ptr = addr;
         err = 0;
     } else {
-        failure("Memory alocation error");
+        failure("Memory error");
         err = -1;
     }
 
@@ -253,7 +257,7 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
     return err;
 }
 
-int create_noblock_srv_socket(struct io_info *io_info_ptr)
+int create_noblock_srv_socket(AppState *app)
 {
     int sock;
     int err;
@@ -284,8 +288,8 @@ int create_noblock_srv_socket(struct io_info *io_info_ptr)
         return -1;
     }
 
-    io_info_ptr->srv_sock = sock;
-    io_info_ptr->addr = addr;
+    app->server_sock = sock;
+    app->addr = addr;
 
     return 0;
 }
@@ -299,8 +303,8 @@ void set_client_sock_opts(int sock)
         return;
     }
 
-    /* We operate on small chunks of data. Disable
-     * Nagle algorithm to decrease the latency.
+    /* We operate on small chunks of data so it seems that it is better
+     * to disable Nagle's algorithm.
      */
     err = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     if (err) {
@@ -308,92 +312,93 @@ void set_client_sock_opts(int sock)
     }
 }
 
-void socket_listening_report(struct io_info *io_info_p) {
-    char *host_name = inet_ntoa(io_info_p->addr->sin_addr);
+void print_listen_report(AppState *app) {
+    char *host_name = inet_ntoa(app->addr->sin_addr);
     if (!host_name) {
         host_name = opts.host;
     }
 
-    unsigned port = ntohs(io_info_p->addr->sin_port);
+    unsigned port = ntohs(app->addr->sin_port);
 
     printf("Listening on %s:%u\n", host_name, port);
 }
 
-void start_main_loop(struct io_info *io_info_p)
+void run_server(AppState *app)
 {
     fd_set readfds, active_readfds;
-    int nfds, err;
+    int nfds, status;
 
-    if (create_noblock_srv_socket(io_info_p) < 0) {
+    app->server_sock = create_noblock_srv_socket(app);
+    if (app->server_sock < 0) {
         failure("Socket error");
         goto exit;
     }
 
-    socket_listening_report(io_info_p);
+    print_listen_report(app);
 
-    nfds = MAX(io_info_p->srv_sock, io_info_p->notify_fd->fd);
-    
+    nfds = MAX(app->server_sock, app->notify_fd->fd);
+
     if (nfds > FD_SETSIZE) {
         failure("fd is greater than FD_SETSIZE");
         goto exit;
     }
 
     FD_ZERO(&active_readfds);
-    FD_SET(io_info_p->srv_sock, &active_readfds);
-    FD_SET(io_info_p->notify_fd->fd, &active_readfds);
+    FD_SET(app->server_sock, &active_readfds);
+    FD_SET(app->notify_fd->fd, &active_readfds);
 
     while (!got_interp_signal) {
         readfds = active_readfds;
-        err = select(nfds+1, &readfds, NULL, NULL, NULL);
+        status = select(nfds+1, &readfds, NULL, NULL, NULL);
 
-        if (err < 0) {
+        if (!status)
+            continue;
+
+        if (status < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             
             failure("select() error");
             break;
         }
-        
-        if (err == 0)
-            continue;
 
         /* Check and read client socket */
-        if (io_info_p->client_sock && FD_ISSET(io_info_p->client_sock, &readfds)) {
+        if (app->client_sock && FD_ISSET(app->client_sock, &readfds)) {
+            const int mtu = app->notify_fd->mtu;
             int len;
-            int buf_size = io_info_p->notify_fd->mtu;
-            char buf[buf_size];
+            char buf[mtu];
 
             memset(buf, 0, buf_size);
             
-            len = recv(io_info_p->client_sock, buf, buf_size, 0);
+            len = recv(app->client_sock, buf, buf_size, 0);
 
             if (len < 0) {
                 failure("notify data read error");
                 break;
+                // TODO: do no brake, just continue the loop
             }
 
-            if (len) {
-                if (write_chr(buf, len) < 0) {
-                    failure("failed to write data to characteristic");
-                    break;
-                }
-            } else {
-                FD_CLR(io_info_p->client_sock, &active_readfds);
-                nfds = MAX(io_info_p->srv_sock, io_info_p->notify_fd->fd);
-                close(io_info_p->client_sock);
-                io_info_p->client_sock = 0;
-            }
+            if (len == 0) {
+                FD_CLR(app->client_sock, &active_readfds);
+                nfds = MAX(app->server_sock, app->notify_fd->fd);
+                close(app->client_sock);
+                app->client_sock = 0;
+            } else if (ble_write_chr(buf, len) < 0) {
+                // TODO: reconnect place
+                failure("failed to write data to characteristic");
+                break;
+            }   
         }
 
         /* Accepting new client connection */
-        if (FD_ISSET(io_info_p->srv_sock, &readfds)) {
-            int accepted_sock = accept(io_info_p->srv_sock, NULL, NULL);
+        if (FD_ISSET(app->server_sock, &readfds)) {
+            int accepted_sock = accept(app->server_sock, NULL, NULL);
             if (accepted_sock < 0) {
                 failure("accept() error");
                 break;
             }
 
-            if (!io_info_p->client_sock) {
+            if (!app->client_sock) {
                 set_client_sock_opts(accepted_sock);
                 nfds = MAX(accepted_sock, nfds);
                 if (nfds > FD_SETSIZE) {
@@ -401,52 +406,60 @@ void start_main_loop(struct io_info *io_info_p)
                     break;
                 }
                 FD_SET(accepted_sock, &active_readfds);
-                io_info_p->client_sock = accepted_sock;
+                app->client_sock = accepted_sock;
             } else {
                 close(accepted_sock);
             }
         }
 
-        if (FD_ISSET(io_info_p->notify_fd->fd, &readfds)) {
+        /* Check data from BLE */
+        if (FD_ISSET(app->notify_fd->fd, &readfds)) {
             ssize_t len;
-            int buf_size = io_info_p->notify_fd->mtu;
-            char buf[buf_size];
+            char buf[mtu] = {0};
 
-            memset(buf, 0, buf_size);
-
-            len = read(io_info_p->notify_fd->fd, buf, (size_t)buf_size);
+            len = read(app->notify_fd->fd, buf, (size_t)buf_size);
 
             if (len < 0) {
+                // TODO: BLE reconnect place? Or maybe drop client connection?
                 failure("notify data read error");
                 break;
             }
 
             if (len == 0) {
+                // TODO: BLE reconnect place
                 puts("notify descriptor has been closed. The remote device is "
                      "probably disconnected");
                 break;
             }
 
-            if (io_info_p->client_sock) {
-                len = send(io_info_p->client_sock, buf, len, 0);
+            if (app->client_sock) {
+                len = send(app->client_sock, buf, len, 0);
                 if (len < 0) {
                     failure("send to socket failed\n");
                     break;
                 }
-
+                /* TODO: add option not to finish when client is disconnected */
             }
+        }
+    }
+
+    while(1) {
+        polling_loop();
+        if (opts.reconnect) {
+            /* Reconnect here */
+            continue;
         }
     }
 
 exit:
 
-    close(io_info_p->notify_fd->fd);
+    close(app->notify_fd->fd);
 
-    if (io_info_p->srv_sock > 0)
-        close(io_info_p->srv_sock);
+    if (app->server_sock > 0)
+        close(app->server_sock);
 
-    if (io_info_p->client_sock > 0)
-        close(io_info_p->client_sock);
+    if (app->client_sock > 0)
+        close(app->client_sock);
 }
 
 // void init_cmd_args(int argc, char **argv)
@@ -537,7 +550,7 @@ static int create_dbus_conn(void)
 void init_app(int argc, char *argv[]) {
     int err = parse_args(argc, argv);
 
-    if (err == -ARG_ERR_HELP)
+    if (err == -ARG_HELP)
         exit(0);
 
     if (err < 0)
@@ -574,9 +587,9 @@ int main(int argc, char *argv[])
      */
     sleep(1);
 
-    io_data.notify_fd = acquire_notify_descr();
-    if (io_data.notify_fd != NULL)
-        start_main_loop(&io_data);
+    app.notify_fd = acquire_notify_descr();
+    if (app.notify_fd != NULL)
+        run_server(&app);
     else
         failure("failed to get file handler");
 

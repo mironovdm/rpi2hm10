@@ -36,7 +36,7 @@ GDBusConnection *dbus_conn;
 typedef struct app AppState;
 
 struct app {
-    struct bluez_notify_fd *notify_fd;
+    struct ble_notify_fd *notify_fd;
     int server_sock;
     int client_sock;
     struct sockaddr_in *addr;
@@ -71,7 +71,7 @@ void failure(const char *errmsg)
 /**
  * Connect to HM-10 BLE module.
  */
-int dev_connect(void)
+int ble_dev_connect(void)
 {
     GVariant *res;
     GError *error = NULL;
@@ -94,10 +94,27 @@ int dev_connect(void)
     return 0;
 }
 
+int ble_dev_reconnect(AppState *app)
+{
+    while (ble_dev_connect() < 0) {
+        sleep(RECONNECT_ATTEMPT_INTERVAL);
+    }
+
+    ble_after_connect(1);
+
+    free(app->notify_fd);
+    app->notify_fd = ble_acquire_notify_fd();
+    if (app->notify_fd == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
 /**
  * Disconnect HM-10 module.
  */
-int dev_disconnect(void) {
+int ble_dev_disconnect(void) {
     GVariant *res;
     GError *error = NULL;
 
@@ -117,6 +134,17 @@ int dev_disconnect(void) {
     g_variant_unref(res);
     
     return 0;
+}
+
+void ble_after_connect()
+{
+    /*
+     * Need to give some time to Bluez to discover services and 
+     * initialize internal structures in the case when connection
+     * has not yet been established. Some more reliable way is
+     * needed.
+     */
+    sleep(1);
 }
 
 /* 
@@ -175,11 +203,11 @@ int ble_write_chr(const char * const data, size_t len)
  * get file handler for receiving data from remote Bluetooth 
  * device.
  */
-struct bluez_notify_fd *acquire_notify_descr(void)
+struct ble_notify_fd *ble_acquire_notify_fd(void)
 {
     int fdlist_idx = 0;
     char *dbus_iface = "org.bluez.GattCharacteristic1";
-    struct bluez_notify_fd *fd_handler;
+    struct ble_notify_fd *fd_handler;
     GVariant *res = NULL;
     GError *error = NULL;
     GVariantBuilder options;
@@ -206,7 +234,7 @@ struct bluez_notify_fd *acquire_notify_descr(void)
         return NULL;
     }
 
-    fd_handler = malloc(sizeof(struct bluez_notify_fd));
+    fd_handler = malloc(sizeof(struct ble_notify_fd));
 
     g_variant_get(res, "(hq)", &fdlist_idx, &fd_handler->mtu);
     fd_handler->fd = g_unix_fd_list_get(fdlist, fdlist_idx, &error);
@@ -323,6 +351,115 @@ void print_listen_report(AppState *app) {
     printf("Listening on %s:%u\n", host_name, port);
 }
 
+/**
+ * Handle data from client connection.
+ */
+int handle_client_socket(AppState *app, fd_set *fds, int *nfds)
+{
+    ssize_t len;
+    char buf[app->notify_fd->mtu] = {0};
+
+    if (!app->client_sock || !FD_ISSET(app->client_sock, fds)) {
+        return;
+    }
+    
+    len = recv(app->client_sock, buf, sizeof buf, 0);
+
+    if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return 0;
+    }
+
+    if (len < 0) {
+        failure("socket read error");
+        return -1;
+    }
+
+    /* 0 is return if peer closed the connection. */
+    if (len == 0) {
+        FD_CLR(app->client_sock, fds);
+        *nfds = MAX(app->server_sock, app->notify_fd->fd);
+        close(app->client_sock);
+        app->client_sock = 0;
+        return 0;
+    } 
+    
+    if (ble_write_chr(buf, len) < 0) {
+        /* TODO: return BLE disonnect error */
+        failure("BLE write error");
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * Handle server inbound connections.
+ */
+int handle_server_socket(AppState *app, fd_set *fds, int *nfds)
+{
+    int accepted_sock;
+
+    if (!FD_ISSET(app->server_sock, fds)) {
+        return 0;
+    }
+
+    accepted_sock = accept(app->server_sock, NULL, NULL);
+    
+    if (accepted_sock < 0) {
+        failure("server error");
+        return -1;
+    }
+
+    /* Reject new connections if there is already one. */
+    if (app->client_sock) {
+        close(accepted_sock);
+        return 0;
+    }
+
+    set_client_sock_opts(accepted_sock);
+    *nfds = MAX(accepted_sock, nfds);
+    FD_SET(accepted_sock, fds);
+    app->client_sock = accepted_sock;
+
+    return 0;
+}
+
+/**
+ * Handle data from BLE device.
+ */
+int handle_ble_fd(AppState *app, fd_set *fds)
+{
+    ssize_t len;
+    char buf[app->notify_fd->mtu] = {0};
+
+    if (!FD_ISSET(app->notify_fd->fd, fds)) {
+        return 0;
+    }
+
+    len = read(app->notify_fd->fd, buf, sizeof buf);
+    if (len < 0) {
+        fprintf(stderr, "BLE read error");
+        return -1;
+    }
+    if (len == 0) {
+        puts("BLE device disconnected");
+        return -1;
+    }
+
+    if (!app->client_sock) {
+        return 0;
+    }
+
+    /* TODO: Not all data may be handled in one call. */
+    len = send(app->client_sock, buf, len, 0);
+    if (len < 0) {
+        fprintf(stderr, "Error");
+        return -1;
+    }
+
+    return 0;
+}
+
 void run_server(AppState *app)
 {
     fd_set readfds, active_readfds;
@@ -362,93 +499,9 @@ void run_server(AppState *app)
             break;
         }
 
-        /* Check and read client socket */
-        if (app->client_sock && FD_ISSET(app->client_sock, &readfds)) {
-            const int mtu = app->notify_fd->mtu;
-            int len;
-            char buf[mtu];
-
-            memset(buf, 0, buf_size);
-            
-            len = recv(app->client_sock, buf, buf_size, 0);
-
-            if (len < 0) {
-                failure("notify data read error");
-                break;
-                // TODO: do no brake, just continue the loop
-            }
-
-            if (len == 0) {
-                FD_CLR(app->client_sock, &active_readfds);
-                nfds = MAX(app->server_sock, app->notify_fd->fd);
-                close(app->client_sock);
-                app->client_sock = 0;
-            } else if (ble_write_chr(buf, len) < 0) {
-                // TODO: reconnect place
-                failure("failed to write data to characteristic");
-                break;
-            }   
-        }
-
-        /* Accepting new client connection */
-        if (FD_ISSET(app->server_sock, &readfds)) {
-            int accepted_sock = accept(app->server_sock, NULL, NULL);
-            if (accepted_sock < 0) {
-                failure("accept() error");
-                break;
-            }
-
-            if (!app->client_sock) {
-                set_client_sock_opts(accepted_sock);
-                nfds = MAX(accepted_sock, nfds);
-                if (nfds > FD_SETSIZE) {
-                    failure("Socket number reached limit");
-                    break;
-                }
-                FD_SET(accepted_sock, &active_readfds);
-                app->client_sock = accepted_sock;
-            } else {
-                close(accepted_sock);
-            }
-        }
-
-        /* Check data from BLE */
-        if (FD_ISSET(app->notify_fd->fd, &readfds)) {
-            ssize_t len;
-            char buf[mtu] = {0};
-
-            len = read(app->notify_fd->fd, buf, (size_t)buf_size);
-
-            if (len < 0) {
-                // TODO: BLE reconnect place? Or maybe drop client connection?
-                failure("notify data read error");
-                break;
-            }
-
-            if (len == 0) {
-                // TODO: BLE reconnect place
-                puts("notify descriptor has been closed. The remote device is "
-                     "probably disconnected");
-                break;
-            }
-
-            if (app->client_sock) {
-                len = send(app->client_sock, buf, len, 0);
-                if (len < 0) {
-                    failure("send to socket failed\n");
-                    break;
-                }
-                /* TODO: add option not to finish when client is disconnected */
-            }
-        }
-    }
-
-    while(1) {
-        polling_loop();
-        if (opts.reconnect) {
-            /* Reconnect here */
-            continue;
-        }
+        handle_server_socket(app, &readfds);
+        handle_client_socket(app, &readfds, app->notify_fd->mtu);
+        handle_ble_fd(app, &readfds);
     }
 
 exit:
@@ -566,35 +619,28 @@ void before_exit(void)
 {
     if (dbus_conn != NULL)
         g_object_unref(dbus_conn);
+
+    if (!opts.keep_ble_con)
+        ble_dev_disconnect();
 }
 
 int main(int argc, char *argv[])
 {
     init_app(argc, argv);
 
-    if (dev_connect() < 0) {
+    if (ble_dev_connect() < 0) {
         errno = 0;
         failure("failed to connect to BLE device");
         before_exit();
         return EXIT_FAILURE;
     }
+    ble_after_connect();
 
-    /*
-     * Need to give some time to Bluez to discover services and 
-     * initialize internal structures in the case when connection
-     * has not yet been established. This is very simplified way 
-     * and it needs to change this to some reliable.
-     */
-    sleep(1);
-
-    app.notify_fd = acquire_notify_descr();
+    app.notify_fd = ble_acquire_notify_fd();
     if (app.notify_fd != NULL)
         run_server(&app);
     else
         failure("failed to get file handler");
-
-    if (!opts.keep_ble_con)
-        dev_disconnect();
 
     before_exit();
 

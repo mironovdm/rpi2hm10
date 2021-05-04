@@ -7,22 +7,21 @@
  */
 
 #include <assert.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <netdb.h>
-
-#include <sys/time.h>       /* For portability [M.Kerrisk p.1331] */
+#include <string.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>       /* For portability [M.Kerrisk p.1331] */
+#include <unistd.h>
 
 // #include <glib.h>
 #include <gio/gio.h>
@@ -30,17 +29,9 @@
 
 #include "main.h"
 #include "argparse.h"
+#include "debug.h"
 
 GDBusConnection *dbus_conn;
-
-typedef struct app AppState;
-
-struct app {
-    struct ble_notify_fd *notify_fd;
-    int server_sock;
-    int client_sock;
-    struct sockaddr_in *addr;
-} app;
 
 extern struct cmd_args opts;
 
@@ -56,95 +47,109 @@ static int exit_val = 0;
 const char bluez_bus_name[] = "org.bluez";
 
 
-void sig_handler(int signum)
+void AppState_close_fd(AppState *app)
+{
+    if (!app->notify_fdp)
+        return;
+    
+    close(app->notify_fdp->fd);
+    free(app->notify_fdp);
+    app->notify_fdp = NULL;
+}
+
+
+void app_sig_handler(int signum)
 {
 	got_interp_signal = 1;
 }
 
+int is_interrupted()
+{
+    return got_interp_signal == 1;
+}
+
 void failure(const char *errmsg)
 {
-    perror(errmsg);
-    fprintf(stderr, "errno=%d\n", errno);
+    if (errno) {
+        perror(errmsg);
+        fprintf(stderr, "errno=%d\n", errno);
+    } else {
+        fprintf(stderr, "%s\n", errmsg);
+    }
     exit_val = 1;
 }
 
-/**
- * Connect to HM-10 BLE module.
- */
-int ble_dev_connect(void)
+void print_gerror(char msg[static 1], GError *err)
 {
-    GVariant *res;
-    GError *error = NULL;
-
-    res = g_dbus_connection_call_sync(
-        dbus_conn, bluez_bus_name, opts.dev_path, "org.bluez.Device1",  "Connect", NULL, NULL, 
-        G_DBUS_CALL_FLAGS_NONE, CONNECT_TIMEOUT_MS, NULL, &error
+    fprintf(
+        stderr, "%s: domain=%u, code=%d, message=%s\n",
+        msg, err->domain, err->code, err->message
     );
-
-    if (res == NULL){
-        fprintf(stderr, "D-BUS error: %s\n", error->message);
-        g_error_free(error);
-        return -1;
-    }
-
-    g_variant_unref(res);
-
-    printf("Device %s connected\n", opts.dev_path);
-    
-    return 0;
 }
 
-int ble_dev_reconnect(AppState *app)
-{
-    while (ble_dev_connect() < 0) {
-        sleep(RECONNECT_ATTEMPT_INTERVAL);
-    }
-
-    ble_after_connect(1);
-
-    free(app->notify_fd);
-    app->notify_fd = ble_acquire_notify_fd();
-    if (app->notify_fd == NULL) {
-        return -1;
-    }
-
-    return 0;
-}
-
-/**
- * Disconnect HM-10 module.
+/*
+ * Call 'AcquireNotify' on the characteristic interface to 
+ * get file handler for receiving data from remote Bluetooth 
+ * device.
  */
-int ble_dev_disconnect(void) {
-    GVariant *res;
-    GError *error = NULL;
-
-    res = g_dbus_connection_call_sync(
-        dbus_conn, bluez_bus_name, opts.dev_path,
-        "org.bluez.Device1", "Disconnect", /* parameters */ NULL, 
-        /* reply_type: */ NULL, G_DBUS_CALL_FLAGS_NONE, 
-        -1, NULL, &error
-    );
-
-    if (res == NULL){
-        printf("Error: %s\n", error->message);
-        g_error_free(error);
-        return -1;
-    }
-
-    g_variant_unref(res);
-    
-    return 0;
-}
-
-void ble_after_connect()
+struct ble_notify_fd *ble_acquire_notify_fd(GError **errp)
 {
-    /*
-     * Need to give some time to Bluez to discover services and 
-     * initialize internal structures in the case when connection
-     * has not yet been established. Some more reliable way is
-     * needed.
+    char *error_msg;
+    char *dbus_iface = "org.bluez.GattCharacteristic1";
+    struct ble_notify_fd *fd_handler;
+    GVariant *res = NULL;
+    GError *error = NULL;
+    GVariantBuilder options;
+    GVariant *params;
+    GUnixFDList *fdlist = g_unix_fd_list_new();
+    int fdlist_idx = 0;
+
+    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+    params = g_variant_new("(@a{sv})", g_variant_builder_end(&options));
+
+    /* 
+     * Here we have to use 'g_dbus_connection_call_with_unix_fd_list_sync'
+     * to get file descriptor.
      */
-    sleep(1);
+    res = g_dbus_connection_call_with_unix_fd_list_sync(
+        dbus_conn, bluez_bus_name, opts.chr_path,
+        dbus_iface, "AcquireNotify", params, NULL, 
+        G_DBUS_CALL_FLAGS_NONE, -1, NULL, &fdlist, NULL, &error
+    );
+
+    if (res == NULL) {
+        error_msg = "Bluetooth notify acquire failed";
+        goto error_exit;
+    }
+
+    fd_handler = malloc(sizeof(struct ble_notify_fd));
+
+    /* (hq) - tuple of h-handle(index of FD array) and q-uint16 */
+    g_variant_get(res, "(hq)", &fdlist_idx, &fd_handler->mtu);
+    fd_handler->fd = g_unix_fd_list_get(fdlist, fdlist_idx, &error);
+    g_object_unref(fdlist);
+
+    if (fd_handler->fd < 0) {
+        error_msg = "Get FD failed";
+        free(fd_handler);
+        goto error_exit;
+    }
+
+    if (res)
+        g_variant_unref(res);
+    
+    return fd_handler;
+
+error_exit:
+
+    if (res)
+        g_variant_unref(res);
+
+    print_gerror(error_msg, error);
+    if (errp)
+        *errp = g_error_copy(error);
+    g_error_free(error);
+    return NULL;
 }
 
 /* 
@@ -187,7 +192,7 @@ int ble_write_chr(const char * const data, size_t len)
     );
 
     if (res == NULL) {
-        printf("ERROR: %s\n", error->message);
+        print_gerror("BLE write error", error);
         g_error_free(error);
         return -1;
     }
@@ -197,59 +202,117 @@ int ble_write_chr(const char * const data, size_t len)
     return 0;
 }
 
-
-/*
- * Call 'AcquireNotify' on the characteristic interface to 
- * get file handler for receiving data from remote Bluetooth 
- * device.
- */
-struct ble_notify_fd *ble_acquire_notify_fd(void)
+void ble_after_connect(AppState *app)
 {
-    int fdlist_idx = 0;
-    char *dbus_iface = "org.bluez.GattCharacteristic1";
-    struct ble_notify_fd *fd_handler;
+    AppState_close_fd(app);
+
+    /*
+     * Need to give some time to Bluez to discover services and 
+     * initialize internal structures in the case when connection
+     * has not yet been established. Some more reliable way is
+     * needed.
+     * 
+     * Listen event on D-Bus:
+     * @ MGMT Event: Device Connected (0x000b) plen 41
+     */
+    sleep(1);
+}
+
+/**
+ * Connect to HM-10 BLE module.
+ */
+int ble_dev_connect(AppState *app)
+{
     GVariant *res = NULL;
     GError *error = NULL;
-    GVariantBuilder options;
-    GVariant *params;
-    GUnixFDList *fdlist = g_unix_fd_list_new();
 
-
-    g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-    params = g_variant_new("(@a{sv})", g_variant_builder_end(&options));
-
-    /* 
-     * Here we have to use 'g_dbus_connection_call_with_unix_fd_list_sync'
-     * to get returned FD.
-     */
-    res = g_dbus_connection_call_with_unix_fd_list_sync(
-        dbus_conn, bluez_bus_name, opts.chr_path,
-        dbus_iface, "AcquireNotify", params, NULL, 
-        G_DBUS_CALL_FLAGS_NONE, -1, NULL, &fdlist, NULL, &error
+    res = g_dbus_connection_call_sync(
+        dbus_conn, bluez_bus_name, opts.dev_path, "org.bluez.Device1",  "Connect", NULL, NULL, 
+        G_DBUS_CALL_FLAGS_NONE, CONNECT_TIMEOUT_MS, NULL, &error
     );
 
-    if (res == NULL) {
-        fprintf(stderr, "ERROR: %s\n", error->message);
+    if (res == NULL){
+        print_gerror("D-Bus connect error", error);
         g_error_free(error);
-        return NULL;
-    }
-
-    fd_handler = malloc(sizeof(struct ble_notify_fd));
-
-    g_variant_get(res, "(hq)", &fdlist_idx, &fd_handler->mtu);
-    fd_handler->fd = g_unix_fd_list_get(fdlist, fdlist_idx, &error);
-    g_object_unref(fdlist);
-
-    if (fd_handler->fd < 0) {
-        fprintf(stderr, "ERROR: %s\n", error->message);
-        g_error_free(error);
-        free(fd_handler);
-        return NULL;
+        app->ble_dev_connected = 0;
+        return -1;
     }
 
     g_variant_unref(res);
+
+    app->ble_dev_connected = 1;
+    printf("Device %s connected\n", opts.dev_path);
     
-    return fd_handler;
+    return 0;
+}
+
+int is_gerror_disconnected(GError *err)
+{
+    return strstr(err->message, BLUEZ_ERR_NOT_CONNECTED) != NULL;
+}
+
+int ble_dev_reconnect(AppState *app)
+{
+    puts("Reconnecting...");
+
+    while (!is_interrupted()) {
+        while (ble_dev_connect(app) < 0) {
+            sleep(RECONNECT_ATTEMPT_INTERVAL);
+            if (is_interrupted())
+                goto out;
+        }
+
+        ble_after_connect(app);
+
+        while (!is_interrupted()) {
+            GError *err = NULL;
+
+            app->notify_fdp = ble_acquire_notify_fd(&err);
+            if (app->notify_fdp)
+                goto out;
+            
+            if (is_gerror_disconnected(err)) {
+                app->ble_dev_connected = 0;
+                break;
+            }
+            
+            debug("BLE FD acquire error");
+            sleep(NOTIFY_ACQ_ATTEMPT_INTERVAL);
+        };
+    }
+out:
+    if (is_interrupted())
+        return -1;
+
+    debug("Reconnected");
+    
+    return 0;
+}
+
+/**
+ * Disconnect HM-10 module.
+ */
+int ble_dev_disconnect(AppState *app) {
+    GVariant *res;
+    GError *error = NULL;
+
+    res = g_dbus_connection_call_sync(
+        dbus_conn, bluez_bus_name, opts.dev_path,
+        "org.bluez.Device1", "Disconnect", /* parameters */ NULL, 
+        /* reply_type: */ NULL, G_DBUS_CALL_FLAGS_NONE, 
+        -1, NULL, &error
+    );
+
+    if (res == NULL){
+        printf("Error: %s\n", error->message);
+        g_error_free(error);
+        return -1;
+    }
+
+    app->ble_dev_connected = 0;
+    g_variant_unref(res);
+    
+    return 0;
 }
 
 int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_ptr)
@@ -288,7 +351,9 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
 int create_noblock_srv_socket(AppState *app)
 {
     int sock;
-    int err;
+    int status;
+    int flags;
+    int optval;
     char port_str[6] = {0};
     struct sockaddr_in *addr = NULL;
 
@@ -296,9 +361,18 @@ int create_noblock_srv_socket(AppState *app)
     if (sock < 0)
         return -1;
 
-    err = fcntl(sock, F_SETFL, O_NONBLOCK);
-    if (err < 0)
-        return err;
+    /* Set socket as non-blocking */
+    flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1)
+        return flags;
+    status = fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    if (status < 0) {
+        failure("can't set socket to nonblock");
+        return -1;
+    }
+
+    optval = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
 
     sprintf(port_str, "%u", (unsigned)opts.port);
     if (fill_sockaddr(opts.host, port_str, &addr) < 0) {
@@ -341,61 +415,38 @@ void set_client_sock_opts(int sock)
 }
 
 void print_listen_report(AppState *app) {
+    unsigned port;
     char *host_name = inet_ntoa(app->addr->sin_addr);
+
     if (!host_name) {
         host_name = opts.host;
     }
-
-    unsigned port = ntohs(app->addr->sin_port);
+    port = ntohs(app->addr->sin_port);
 
     printf("Listening on %s:%u\n", host_name, port);
 }
 
-/**
- * Handle data from client connection.
- */
-int handle_client_socket(AppState *app, fd_set *fds, int *nfds)
+int ble_reconnect_with_fdset_update(AppState *app, fd_set *fds, int *nfds)
 {
-    ssize_t len;
-    char buf[app->notify_fd->mtu] = {0};
+    int old_fd = app->notify_fdp->fd;
+    int status;
 
-    if (!app->client_sock || !FD_ISSET(app->client_sock, fds)) {
-        return;
-    }
+    status = ble_dev_reconnect(app);
+    if (status)
+        return status;
     
-    len = recv(app->client_sock, buf, sizeof buf, 0);
-
-    if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        return 0;
-    }
-
-    if (len < 0) {
-        failure("socket read error");
+    FD_CLR(old_fd, fds);
+    *nfds = MAX(app->notify_fdp->fd, *nfds);
+    if (*nfds > FD_SETSIZE) {
+        failure("file descriptor larger than FD_SETSIZE");
         return -1;
     }
-
-    /* 0 is return if peer closed the connection. */
-    if (len == 0) {
-        FD_CLR(app->client_sock, fds);
-        *nfds = MAX(app->server_sock, app->notify_fd->fd);
-        close(app->client_sock);
-        app->client_sock = 0;
-        return 0;
-    } 
-    
-    if (ble_write_chr(buf, len) < 0) {
-        /* TODO: return BLE disonnect error */
-        failure("BLE write error");
-        return -1;
-    }
+    FD_SET(app->notify_fdp->fd, fds);
 
     return 0;
 }
 
-/**
- * Handle server inbound connections.
- */
-int handle_server_socket(AppState *app, fd_set *fds, int *nfds)
+int handle_server_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     int accepted_sock;
 
@@ -403,10 +454,11 @@ int handle_server_socket(AppState *app, fd_set *fds, int *nfds)
         return 0;
     }
 
+    debug("select(): server socket");
     accepted_sock = accept(app->server_sock, NULL, NULL);
     
     if (accepted_sock < 0) {
-        failure("server error");
+        DEBUGF("server socker error: %d", errno);
         return -1;
     }
 
@@ -416,33 +468,98 @@ int handle_server_socket(AppState *app, fd_set *fds, int *nfds)
         return 0;
     }
 
+    puts("client connected");
     set_client_sock_opts(accepted_sock);
-    *nfds = MAX(accepted_sock, nfds);
-    FD_SET(accepted_sock, fds);
+    
+    *nfds = MAX(accepted_sock, *nfds);
+    if (*nfds > FD_SETSIZE)
+        return -1;
+
+    FD_SET(accepted_sock, active_fds);
     app->client_sock = accepted_sock;
 
     return 0;
 }
 
-/**
- * Handle data from BLE device.
- */
-int handle_ble_fd(AppState *app, fd_set *fds)
+int handle_client_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     ssize_t len;
-    char buf[app->notify_fd->mtu] = {0};
+    int status;
+    char buf[app->notify_fdp->mtu];
 
-    if (!FD_ISSET(app->notify_fd->fd, fds)) {
+    if (!app->client_sock || !FD_ISSET(app->client_sock, fds)) {
         return 0;
     }
 
-    len = read(app->notify_fd->fd, buf, sizeof buf);
+    debug("select(): client socket");
+    memset(buf, 0, sizeof(buf));
+    
+    len = recv(app->client_sock, buf, sizeof buf, 0);
+
+    if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        puts("client EAGAIN");
+        return 0;
+    }
+
+    if (len < 0) {
+        failure("socket read error");
+        return -1;
+    }
+
+    DEBUGF("client -> BLE, %u bytes\n", (unsigned)len);
+
+    /* 0 is returned if peer closed the connection. */
+    if (len == 0) {
+        FD_CLR(app->client_sock, active_fds);
+        *nfds = MAX(app->server_sock, app->notify_fdp->fd);
+        if (*nfds > FD_SETSIZE)
+            return -1;
+        close(app->client_sock);
+        app->client_sock = 0;
+        return 0;
+    } 
+    
+    if (!ble_write_chr(buf, len))
+        return 0;
+
+    fputs("BLE disconnected\n", stderr);
+    if (!opts.reconnect)
+        return -1;
+    
+    status = ble_reconnect_with_fdset_update(app, active_fds, nfds);
+    if (status)
+        return -1;
+    
+    return 0;
+}
+
+/* TODO: check if zero is returned when a device is disconnected */
+int handle_ble_fd(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
+{
+    ssize_t len;
+    char buf[app->notify_fdp->mtu];
+
+    memset(buf, 0, sizeof(buf));
+
+    if (!FD_ISSET(app->notify_fdp->fd, fds)) {
+        return 0;
+    }
+
+    debug("select(): BLE FD");
+
+    len = read(app->notify_fdp->fd, buf, sizeof buf);
     if (len < 0) {
         fprintf(stderr, "BLE read error");
         return -1;
     }
     if (len == 0) {
-        puts("BLE device disconnected");
+        fputs("BLE disconnected\n", stderr);
+        if (opts.reconnect) {
+            int status = ble_reconnect_with_fdset_update(app, active_fds, nfds);
+            if (status)
+                return -1;
+            return 0;
+        }
         return -1;
     }
 
@@ -450,7 +567,9 @@ int handle_ble_fd(AppState *app, fd_set *fds)
         return 0;
     }
 
-    /* TODO: Not all data may be handled in one call. */
+    DEBUGF("client <- BLE, %zu bytes\n", len);
+
+    /* TODO: check for partial send */
     len = send(app->client_sock, buf, len, 0);
     if (len < 0) {
         fprintf(stderr, "Error");
@@ -462,94 +581,88 @@ int handle_ble_fd(AppState *app, fd_set *fds)
 
 void run_server(AppState *app)
 {
-    fd_set readfds, active_readfds;
+    fd_set current_fds, active_fds;
     int nfds, status;
 
-    app->server_sock = create_noblock_srv_socket(app);
-    if (app->server_sock < 0) {
+    status = create_noblock_srv_socket(app);
+    if (status < 0) {
         failure("Socket error");
         goto exit;
     }
 
     print_listen_report(app);
 
-    nfds = MAX(app->server_sock, app->notify_fd->fd);
+    nfds = MAX(app->server_sock, app->notify_fdp->fd);
 
     if (nfds > FD_SETSIZE) {
         failure("fd is greater than FD_SETSIZE");
         goto exit;
     }
 
-    FD_ZERO(&active_readfds);
-    FD_SET(app->server_sock, &active_readfds);
-    FD_SET(app->notify_fd->fd, &active_readfds);
+    FD_ZERO(&active_fds);
+    FD_SET(app->server_sock, &active_fds);
+    FD_SET(app->notify_fdp->fd, &active_fds);
 
-    while (!got_interp_signal) {
-        readfds = active_readfds;
-        status = select(nfds+1, &readfds, NULL, NULL, NULL);
+    while (!is_interrupted()) {
+        current_fds = active_fds;
+        status = select(nfds+1, &current_fds, NULL, NULL, NULL);
+        debug("select() returned");
 
-        if (!status)
+        if (!status) {
+            debug("restart select()");
             continue;
+        }
 
         if (status < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 continue;
             
             failure("select() error");
             break;
         }
 
-        handle_server_socket(app, &readfds);
-        handle_client_socket(app, &readfds, app->notify_fd->mtu);
-        handle_ble_fd(app, &readfds);
+        status = handle_server_socket(app, &current_fds, &active_fds, &nfds);
+        status |= handle_client_socket(app, &current_fds, &active_fds, &nfds);
+        status |= handle_ble_fd(app, &current_fds, &active_fds, &nfds);
+        
+        if (status) {
+            break;
+        }
     }
+
+    puts("after while");
 
 exit:
 
-    close(app->notify_fd->fd);
+    AppState_close_fd(app);
 
-    if (app->server_sock > 0)
+    if (app->server_sock >= 0) {
+        debug("Close server socket");
         close(app->server_sock);
+    }
 
-    if (app->client_sock > 0)
+    if (app->client_sock > 0) {
+        debug("Close client socket");
         close(app->client_sock);
+    }
 }
 
-// void init_cmd_args(int argc, char **argv)
-// {
-//     long port;
-
-//     if (argc < 5) {
-//         fprintf(
-//             stderr, 
-//             "Error: wrong number of arguments\n"
-//             "Command usage:\n"
-//             "rpi2hm10 [HOST] [PORT] [DEVICE_OBJ_PATH] [CHARACTERISTIC_OBJ_PATH]\n"
-//         );
-//         exit(1);
-//     }
-    
-//     cmd_args.host = argv[1];
-//     cmd_args.dev_obj_path = argv[3];
-//     cmd_args.chr_obj_path = argv[4];
-
-//     errno = 0;
-//     port = strtol(argv[2], NULL, 10);
-//     if (errno != 0 ||  port < 1 || port > UINT16_MAX ) {
-//         fprintf(stderr, "Wrong port number");
-//         exit(1);
-//     }
-
-//     cmd_args.port = (uint16_t)port;
-// }
-
-void init_sig_handlers(void)
+int init_sig_handlers(void)
 {
+    int status;
     struct sigaction sig_action = {
-        .sa_handler=sig_handler
+        .sa_handler=app_sig_handler
     };
-    sigaction(SIGINT, &sig_action, NULL);
-    sigaction(SIGTERM, &sig_action, NULL);
+    sigemptyset(&sig_action.sa_mask);
+
+    status = sigaction(SIGINT, &sig_action, NULL);
+    status |= sigaction(SIGTERM, &sig_action, NULL);
+    if (status) {
+        perror("set signal error");
+        return -1;
+    }
+
+    return 0;
 }
 
 static int g_error_handle(GError **err, const char *msg)
@@ -600,49 +713,68 @@ static int create_dbus_conn(void)
     return 0;
 }
 
+void close_dbus_conn()
+{
+    GError *err = NULL;
+    bool status;
+
+    status = g_dbus_connection_close_sync(dbus_conn, NULL, &err);
+    g_object_unref(dbus_conn);
+
+    if (!status) {
+        fprintf(stderr, "dbus error: %s\n", err->message);
+        failure(NULL);
+        g_error_handle(&err, NULL);
+    }
+}
+
 void init_app(int argc, char *argv[]) {
-    int err = parse_args(argc, argv);
+    int status = parse_args(argc, argv);
 
-    if (err == -ARG_HELP)
+    if (status == -ARG_HELP)
         exit(0);
-
-    if (err < 0)
+    if (status < 0)
         exit(1);
 
-    init_sig_handlers();
-
-    if (create_dbus_conn() < 0)
+    if (init_sig_handlers() || create_dbus_conn())
         exit(1);
 }
 
-void before_exit(void)
+void before_exit(AppState *app)
 {
-    if (dbus_conn != NULL)
-        g_object_unref(dbus_conn);
+    if (!dbus_conn)
+        return;
 
-    if (!opts.keep_ble_con)
-        ble_dev_disconnect();
+    AppState_close_fd(app);
+    
+    if (app->ble_dev_connected && !opts.keep_ble_con) {
+        debug("BLE disconnect");
+        ble_dev_disconnect(app);
+    }
+
+    close_dbus_conn();
 }
 
 int main(int argc, char *argv[])
 {
+    AppState app = {0};
+
+    debug_init();
     init_app(argc, argv);
 
-    if (ble_dev_connect() < 0) {
-        errno = 0;
+    /* TODO reconnect on start. We can test Ctrl+C */
+    if (ble_dev_reconnect(&app) < 0) {
         failure("failed to connect to BLE device");
-        before_exit();
+        before_exit(&app);
         return EXIT_FAILURE;
     }
-    ble_after_connect();
+    ble_after_connect(&app);
 
-    app.notify_fd = ble_acquire_notify_fd();
-    if (app.notify_fd != NULL)
+    app.notify_fdp = ble_acquire_notify_fd(NULL);
+    if (app.notify_fdp != NULL)
         run_server(&app);
-    else
-        failure("failed to get file handler");
 
-    before_exit();
+    before_exit(&app);
 
     return exit_val;
 }

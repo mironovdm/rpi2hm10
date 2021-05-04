@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <gio/gio.h>
+
 #include "argparse.h"
 
 const char *help_text = ""
@@ -105,11 +107,6 @@ static inline void opt_handle_reconnect(void)
     opts.reconnect = 1;
 }
 
-static inline int is_set_required_args(void)
-{
-    return opts.dev_path != NULL && opts.chr_path != NULL;
-}
-
 static inline void opt_handle_keep_ble_con(void)
 {
     opts.keep_ble_con = 1;
@@ -157,16 +154,33 @@ static int parse_option(int opt) {
     return 0;
 }
 
-/**
- * Set default values for not defined arguments
- */
 static void arg_set_default(void)
 {
     if (opts.host == NULL)
         opts.host = "localhost";
 
-    if (opts.port < 0)
+    if (opts.port <= 0)
         opts.port = 3000;
+}
+
+static inline int is_set_required_args(void)
+{
+    return opts.dev_path != NULL && opts.chr_path != NULL;
+}
+
+static inline int validate_args(void)
+{
+
+    if (!g_variant_is_object_path(opts.dev_path)) {
+        fprintf(stderr, "argument error: incorrect device path %s\n", opts.dev_path);
+        return -1;
+    }
+    if (!g_variant_is_object_path(opts.chr_path)) {
+        fprintf(stderr, "argument error: incorrect characteristic path %s\n", opts.chr_path);
+        return -1;
+    }
+
+    return 0;
 }
 
 static int parse_options(int argc, char *argv[])
@@ -191,6 +205,10 @@ int parse_args(int argc, char *argv[])
 
     if (!is_set_required_args()) {
         fprintf(stderr, "Error: required parameters are not defined\n");
+        return -1;
+    }
+
+    if (validate_args()) {
         return -1;
     }
 

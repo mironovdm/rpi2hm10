@@ -1,28 +1,37 @@
-CFLAGS = -Wall --std=gnu11 -pedantic
+CFLAGS = -Wall --std=gnu11 -pedantic -g -O2
 
 TARGET = rpi2hm10
 SRCDIR = src
+BUILDDIR = build
 
 INCLUDE_GLIB = `pkg-config --cflags glib-2.0 gio-unix-2.0`
 LIB_GLIB = `pkg-config --libs glib-2.0`
 LIB_GIO = `pkg-config --libs gio-2.0`
 
+sources := $(wildcard $(SRCDIR)/*.c)
+objects := $(patsubst $(SRCDIR)/%.o,$(BUILDDIR)/%.o,$(sources:%.c=%.o))
 
-.PHONY: all clean
+$(info # objects = ${objects})
+$(info # sources = ${sources})
 
-all: $(TARGET)
+.PHONY: call all required_dirs clean
 
-$(TARGET): $(SRCDIR)/main.o $(SRCDIR)/argparse.o
+all: required_dirs $(TARGET)
+
+call: clean all
+
+$(TARGET): $(objects)
 	$(CC) $(CFLAGS) $^ $(LIB_GLIB) $(LIB_GIO) -o $(TARGET)
 
-$(SRCDIR)/main.o: $(SRCDIR)/main.c
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c
 	$(CC) $(CFLAGS) $(INCLUDE_GLIB) -c -o $@ $<
 
-$(SRCDIR)/argparse.o: $(SRCDIR)/argparse.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+
+required_dirs:
+	mkdir -p build
 
 clean:
-	rm -f $(SRCDIR)/*.o ./*.o rpi2hm10
+	rm -f $(SRCDIR)/*.o ./*.o rpi2hm10 build/*.*
 
 # Help Target
 help:

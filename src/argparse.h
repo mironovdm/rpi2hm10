@@ -13,8 +13,7 @@ struct cmd_args {
     char *dev_path;
     char *chr_path;
     int reconnect;
-    int keep_ble_con;   /* We don't have to disconnect BLE device on every exit. We can keep
-                           keep connection and use connected device on next launch */
+    int keep_ble_con;   /* Don't disconnect device on exit. */
                         /* @TODO: check if we can use already connected device */
     unsigned arg_flags; /* Bit mask of args that were passed to program */
 };

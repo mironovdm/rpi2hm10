@@ -15,15 +15,16 @@ Or you can use TCP sockets in your program and exchange the binary data
 with your HM-10 module.
 
 ## Important note
-In order to make it work it is required to enable pairing on HM-10. For this set
-auth type with the command AT+TYPE at value 1 or higher. Otherwise Linux's 
-bluetooth daemon failes to enable notifications for the HM-10.
+This tool works with HM-10 V551 and lower version firmware and doesn't work with V710 
+firmware because of a problem with activation of notifications on HM-10, which responds 
+with error. I have not tested versions between V551 and V710.
+
+It seems that it is possible to make V710 work updating some data in bluetoothd cache 
+but it's not rilable way.
 
 ## Hardware
 This utility was developed on Raspberry Pi 3B+. But I suppose it should work 
-on any Pi that has Bluetooth >=4.0 module. And even not only on Raspberry Pi. 
-On any Linux machine which has Bluetooth 4.0 module and uses the official Bluez 
-Bluetooth stack.
+on any Linux powered device with Bluez and BLE support.
 
 You can use original HM-10 modules made by Jinan Huamao as well as HM-10 clones
 wich use another AT-command set, but the same principal of exposing serial 

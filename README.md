@@ -14,6 +14,10 @@ echo -n "AT+PIO20" | nc -vN localhost 9000  #Set HM-10 PIO2 to low
 Or you can use TCP sockets in your program and exchange the binary data 
 with your HM-10 module.
 
+## Important note
+In order to make it work it is required to enable pairing on HM-10. For this set
+auth type with the command AT+TYPE at value 1 or higher. Otherwise Linux's 
+bluetooth daemon failes to enable notifications for the HM-10.
 
 ## Hardware
 This utility was developed on Raspberry Pi 3B+. But I suppose it should work 

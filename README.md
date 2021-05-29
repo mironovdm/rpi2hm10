@@ -20,7 +20,7 @@ firmware because of a problem with activation of notifications on HM-10, which r
 with error. I have not tested versions between V551 and V710.
 
 It seems that it is possible to make V710 work updating some data in bluetoothd cache 
-but it's not reliable way.
+but it's not a reliable way.
 
 ## Hardware
 This utility was developed on Raspberry Pi 3B+. But I suppose it should work 

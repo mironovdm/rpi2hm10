@@ -26,10 +26,13 @@
 // #include <glib.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <glib-object.h>
 
-#include "main.h"
 #include "argparse.h"
+#include "bluetooth.h"
+#include "dbus.h"
 #include "debug.h"
+#include "main.h"
 
 GDBusConnection *dbus_conn;
 
@@ -81,9 +84,17 @@ void failure(const char *errmsg)
 
 void print_gerror(char msg[static 1], GError *err)
 {
+    char *empty = "(NULL)";
+    char *gerror_msg;
+
+    if (err->message)
+        gerror_msg = err->message;
+    else
+        gerror_msg = empty;
+
     fprintf(
         stderr, "%s: domain=%u, code=%d, message=%s\n",
-        msg, err->domain, err->code, err->message
+        msg, err->domain, err->code, gerror_msg
     );
 }
 
@@ -159,12 +170,10 @@ int ble_write_chr(const char * const data, size_t len)
 {
     GVariantBuilder options_builder;
     GVariant *params, *val, *options;
-    GError *error;
+    GError *error = NULL;
     GVariant *res;
     char *dbus_iface;
     char *method;
-
-    error = NULL;
 
     /* 
      * Need to use byte array to have an ability to transmit
@@ -665,24 +674,20 @@ int init_sig_handlers(void)
     return 0;
 }
 
-static int g_error_handle(GError **err, const char *msg)
+static int g_error_handle(GError *err, const char *msg)
 {
     const char *empty = "";
 
-    if (*err == NULL)
+    if (err == NULL)
         return 0;
 
     if (!msg) {
         msg = empty;
     }
     
-    if ((*err)->message != NULL)
-        printf("GError: %s, %s\n", msg, (*err)->message);
-    else
-        printf("GError: %s, no error message\n", msg);
-
-    g_error_free(*err);
-    *err = NULL;
+    print_gerror("GError", err);
+    g_error_free(err);
+    err = NULL;
 
     return -1;
 }
@@ -693,7 +698,7 @@ static int create_dbus_conn(void)
 
     gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
     if (!sys_bus_addr_ptr) {
-        return g_error_handle(&err, "D-BUS bus address resolve failed");
+        return g_error_handle(err, "D-BUS bus address resolve failed");
     }
 
     dbus_conn = g_dbus_connection_new_for_address_sync(
@@ -705,7 +710,7 @@ static int create_dbus_conn(void)
         &err
     );
     if (!dbus_conn) {
-        return g_error_handle(&err, "D-BUS connection failed");
+        return g_error_handle(err, "D-BUS connection failed");
     }
 
     g_free(sys_bus_addr_ptr);
@@ -724,7 +729,7 @@ void close_dbus_conn()
     if (!status) {
         fprintf(stderr, "dbus error: %s\n", err->message);
         failure(NULL);
-        g_error_handle(&err, NULL);
+        g_error_handle(err, NULL);
     }
 }
 
@@ -755,6 +760,229 @@ void before_exit(AppState *app)
     close_dbus_conn();
 }
 
+void dbus_sig_handler(GDBusConnection *connection,
+                        const gchar *sender_name,
+                        const gchar *object_path,
+                        const gchar *interface_name,
+                        const gchar *signal_name,
+                        GVariant *parameters,
+                        gpointer user_data)
+{
+    printf("Callback triggered for iface %s\n", sender_name);
+}
+
+void test_scan_over_manager(AppState *app)
+{
+    GVariant *res;
+    GError *gerror = NULL;
+
+    res = g_dbus_connection_call_sync(
+        dbus_conn,
+        bluez_bus_name,
+        "/org/bluez/hci0",
+        "org.bluez.Adapter1",
+        "StartDiscovery",
+        /* parameters= */ NULL, 
+        /* reply_type= */ NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        /* timeout= */ -1, 
+        /* cancellable= */ NULL,
+        &gerror
+    );
+
+    if (!res) {
+        g_error_handle(gerror, "StartDiscovery error");
+        return;
+    }
+
+
+    puts("discovery started");
+
+    const char *uniq_conn_name = g_dbus_connection_get_unique_name(dbus_conn);
+
+    if (!uniq_conn_name) {
+        puts("fuck! Didn't get name");
+        return;
+    }
+
+    if (uniq_conn_name)
+        printf("got name: %s\n", uniq_conn_name);
+
+
+
+
+    GDBusObjectManager *manager = g_dbus_object_manager_client_new_sync(
+        dbus_conn,
+        G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
+        /* name= */ "org.bluez",
+        /* object_path= */ "/",
+        NULL, NULL, NULL,
+        /* cancelable= */ NULL,
+        &gerror
+    );
+
+    if (!manager) {
+        g_error_handle(gerror, "Manager constructor error");
+        return;
+    }
+
+    puts("Manager created");
+
+
+
+
+    // GDBusObject *hci_object = g_dbus_object_manager_get_object(manager, "/org/bluez/hci0");
+    // if (!hci_object) {
+    //     puts("no hci0 object");
+    //     return;
+    // }
+    // puts("Got hci0 d-bus object");
+
+
+
+
+    // GList *ifaces = g_dbus_object_get_interfaces(hci_object);
+    // if (!ifaces) {
+    //     puts("no ifaces");
+    //     return;
+    // }
+
+    // for (GList *l = ifaces; l != NULL; l = l->next)
+    // {
+    //     GDBusInterface *ifaceitem = G_DBUS_INTERFACE(l->data);
+    //     GDBusInterfaceInfo *info = g_dbus_interface_get_info(ifaceitem);
+    //     if (!info)
+    //         puts("no iface info");
+    //     else
+    //         puts("got info");
+
+    //     gulong handler_id = g_signal_connect(ifaceitem, "PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
+    //     if (!handler_id) {
+    //         puts("g_signal_connect() failed, handler ID is 0");
+    //         // return;
+    //     }
+
+    //     /* Do something with @element_data. */
+    // }
+
+
+
+    /*
+        interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
+    */
+
+
+
+
+    // GDBusInterface *iface = g_dbus_object_get_interface(hci_object, "org.freedesktop.DBus.Properties");
+    // if (iface == NULL) {
+    //     puts("no interface");
+    //     return;
+    // }
+
+    GDBusInterface *iface = g_dbus_object_manager_get_interface(manager, "/org/bluez/hci0", "org.freedesktop.DBus.Properties");
+    if (iface == NULL) {
+        puts("no interface");
+        return;
+    }
+
+    if (!G_IS_DBUS_INTERFACE(iface)) {
+        puts("not interface");
+        return;
+    }
+
+    // const char *name = g_dbus_proxy_get_interface_info (iface);
+    // if(!name) {
+    //     puts("no name");
+    //     return;
+    // }
+
+    // puts("name");
+    // puts(name);
+
+
+    GDBusInterfaceInfo *info = g_dbus_proxy_get_interface_info(iface);
+    if (!info) {
+        puts("no info");
+        // return;
+    }
+
+    gulong handler_id = g_signal_connect(iface, "::PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
+    if (!handler_id) {
+        puts("g_signal_connect() failed");
+        return;
+    }
+
+    sleep(5);
+
+    g_object_unref(iface);
+    // g_object_unref(hci_object);
+}
+
+#include <pthread.h>
+
+void test_scan(AppState *app)
+{
+    GVariant *res;
+    GError *gerror = NULL;
+
+    GMainLoop *loop = g_main_loop_new(NULL, 0);
+
+    const char *uniq_name = g_dbus_connection_get_unique_name(dbus_conn);
+    if (!uniq_name) {
+        puts("fuck! Didn't get name");
+        return;
+    }
+
+    guint subscr_id = g_dbus_connection_signal_subscribe(
+        dbus_conn,
+        DBUS_ORG_BLUEZ_BUS,
+        DBUS_IFACE_PROPERTIES,
+        DBUS_SIGNAL_PROPERTIES_CHANGED,
+        "/org/bluez/hci0/dev_5C_12_03_6A_24_E7",
+        NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE,
+        dbus_sig_handler,
+        NULL,
+        NULL
+    );
+    printf("subscriber id %d\n", subscr_id);
+
+
+    pthread_t thread_id;
+    pthread_create(&thread_id, NULL, (void *(*)(void *))g_main_loop_run, loop);
+
+    puts("main loop started");
+    sleep(1);
+
+
+    res = g_dbus_connection_call_sync(
+        dbus_conn,
+        bluez_bus_name,
+        "/org/bluez/hci0",
+        "org.bluez.Adapter1",
+        "StartDiscovery",
+        /* parameters= */ NULL, 
+        /* reply_type= */ NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        /* timeout= */ -1, 
+        /* cancellable= */ NULL,
+        &gerror
+    );
+    if (!res) {
+        g_error_handle(gerror, "StartDiscovery error");
+        return;
+    }
+    puts("enable discovery");
+
+
+    sleep(7);
+    g_main_loop_quit(loop);
+    pthread_join(thread_id, NULL);
+    puts("main loop stopped");
+
+}
+
 int main(int argc, char *argv[])
 {
     AppState app = {0};
@@ -762,19 +990,23 @@ int main(int argc, char *argv[])
     debug_init();
     init_app(argc, argv);
 
-    /* TODO reconnect on start. We can test Ctrl+C */
-    if (ble_dev_reconnect(&app) < 0) {
-        failure("failed to connect to BLE device");
-        before_exit(&app);
-        return EXIT_FAILURE;
-    }
-    ble_after_connect(&app);
+    // /* TODO reconnect on start option */
+    // if (ble_dev_reconnect(&app) < 0) {
+    //     failure("failed to connect to BLE device");
+    //     before_exit(&app);
+    //     return EXIT_FAILURE;
+    // }
+    // ble_after_connect(&app);
 
-    app.notify_fdp = ble_acquire_notify_fd(NULL);
-    if (app.notify_fdp != NULL)
-        run_server(&app);
-
-    before_exit(&app);
+    test_scan(&app);
 
     return exit_val;
+
+    // app.notify_fdp = ble_acquire_notify_fd(NULL);
+    // if (app.notify_fdp != NULL)
+    //     run_server(&app);
+
+    // before_exit(&app);
+
+    // return exit_val;
 }

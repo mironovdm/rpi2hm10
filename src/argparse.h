@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Not an error actually, just indicates the presence of "--help" argument */
 #define ARG_HELP (512)
 
 struct cmd_args {

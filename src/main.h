@@ -25,8 +25,4 @@ struct app_state {
 
 typedef struct app_state AppState;
 
-
-#define BLUEZ_ERR_INTERFACE "org.bluez.Error"
-#define BLUEZ_ERR_NOT_CONNECTED (BLUEZ_ERR_INTERFACE ".NotConnected")
-
 #endif

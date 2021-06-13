@@ -1,24 +1,60 @@
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "utils.h"
 
-bool is_valid_mac(const char *mac)
+bool is_valid_mac_str(const char *mac_str)
 {
-    if (strlen(mac) < MAC_ADDR_STR_LEN)
+    int matches;
+    unsigned char mac = 0;
+
+    if (strlen(mac_str) < MAC_ADDR_STR_LEN)
+        return false;
+
+    matches = sscanf(
+        mac_str,
+        "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
+        &mac, &mac, &mac, &mac, &mac, &mac
+    );
+
+    if (matches == EOF || matches < MAC_ADDR_STR_LEN)
         return false;
     
     return true;
 }
 
-char *mac_to_dev_path(const char *mac)
+const unsigned char *mac_str_to_bytes(const char *mac_str)
 {
-    unsigned char mac[6] = {0};
-    int parsed = sscanf(
-        "AA:BB:cc:ee:ff:0d",
+    int matches;
+    const unsigned char *mac = malloc(sizeof(unsigned char) * MAC_ADDR_BYTES);
+    if (!mac)
+        return NULL;
+
+    matches = sscanf(
+        mac_str,
         "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
         mac, mac+1, mac+2, mac+3, mac+4, mac+5
     );
 
-    printf("found matches: %d, MAC: %02x:%02x:%02x:%02x:%02x:%02x \n", parsed, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return mac;
+}
+
+const char *mac_to_str(const unsigned char *mac)
+{
+    const char *mac_str = malloc(MAC_ADDR_STR_LEN + 1);
+    
+    if (!mac_str)
+        return NULL;
+
+    sprintf(
+        mac_str,
+        "%02x:%02x:%02x:%02x:%02x:%02x",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+}
+
+unsigned char *split_object_path()
+{
+
 }

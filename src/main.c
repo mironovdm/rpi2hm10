@@ -13,6 +13,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,9 @@
 
 GDBusConnection *dbus_conn;
 
+
+
+
 extern struct cmd_args opts;
 
 /* 
@@ -50,7 +54,7 @@ static int exit_val = 0;
 const char bluez_bus_name[] = "org.bluez";
 
 
-void AppState_close_fd(AppState *app)
+void AppState_close_fd(AppContext *app)
 {
     if (!app->notify_fdp)
         return;
@@ -80,22 +84,6 @@ void failure(const char *errmsg)
         fprintf(stderr, "%s\n", errmsg);
     }
     exit_val = 1;
-}
-
-void print_gerror(char msg[static 1], GError *err)
-{
-    char *empty = "(NULL)";
-    char *gerror_msg;
-
-    if (err->message)
-        gerror_msg = err->message;
-    else
-        gerror_msg = empty;
-
-    fprintf(
-        stderr, "%s: domain=%u, code=%d, message=%s\n",
-        msg, err->domain, err->code, gerror_msg
-    );
 }
 
 /*
@@ -156,7 +144,7 @@ error_exit:
     if (res)
         g_variant_unref(res);
 
-    print_gerror(error_msg, error);
+    gerror_print(error_msg, error);
     if (errp)
         *errp = g_error_copy(error);
     g_error_free(error);
@@ -201,7 +189,7 @@ int ble_write_chr(const char * const data, size_t len)
     );
 
     if (res == NULL) {
-        print_gerror("BLE write error", error);
+        gerror_print("BLE write error", error);
         g_error_free(error);
         return -1;
     }
@@ -211,7 +199,7 @@ int ble_write_chr(const char * const data, size_t len)
     return 0;
 }
 
-void ble_after_connect(AppState *app)
+void ble_after_connect(AppContext *app)
 {
     AppState_close_fd(app);
 
@@ -230,7 +218,7 @@ void ble_after_connect(AppState *app)
 /**
  * Connect to HM-10 BLE module.
  */
-int ble_dev_connect(AppState *app)
+int ble_dev_connect(AppContext *app)
 {
     GVariant *res = NULL;
     GError *error = NULL;
@@ -241,7 +229,7 @@ int ble_dev_connect(AppState *app)
     );
 
     if (res == NULL){
-        print_gerror("D-Bus connect error", error);
+        gerror_print("D-Bus connect error", error);
         g_error_free(error);
         app->ble_dev_connected = 0;
         return -1;
@@ -260,7 +248,7 @@ int is_gerror_disconnected(GError *err)
     return strstr(err->message, BLUEZ_ERR_NOT_CONNECTED) != NULL;
 }
 
-int ble_dev_reconnect(AppState *app)
+int ble_dev_reconnect(AppContext *app)
 {
     puts("Reconnecting...");
 
@@ -301,7 +289,7 @@ out:
 /**
  * Disconnect HM-10 module.
  */
-int ble_dev_disconnect(AppState *app) {
+int ble_dev_disconnect(AppContext *app) {
     GVariant *res;
     GError *error = NULL;
 
@@ -357,7 +345,7 @@ int fill_sockaddr(const char *host, const char *port, struct sockaddr_in **sa_pt
     return err;
 }
 
-int create_noblock_srv_socket(AppState *app)
+int create_noblock_srv_socket(AppContext *app)
 {
     int sock;
     int status;
@@ -423,7 +411,7 @@ void set_client_sock_opts(int sock)
     }
 }
 
-void print_listen_report(AppState *app) {
+void print_listen_report(AppContext *app) {
     unsigned port;
     char *host_name = inet_ntoa(app->addr->sin_addr);
 
@@ -435,7 +423,7 @@ void print_listen_report(AppState *app) {
     printf("Listening on %s:%u\n", host_name, port);
 }
 
-int ble_reconnect_with_fdset_update(AppState *app, fd_set *fds, int *nfds)
+int ble_reconnect_with_fdset_update(AppContext *app, fd_set *fds, int *nfds)
 {
     int old_fd = app->notify_fdp->fd;
     int status;
@@ -455,7 +443,7 @@ int ble_reconnect_with_fdset_update(AppState *app, fd_set *fds, int *nfds)
     return 0;
 }
 
-int handle_server_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
+int handle_server_socket(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     int accepted_sock;
 
@@ -490,7 +478,7 @@ int handle_server_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nf
     return 0;
 }
 
-int handle_client_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
+int handle_client_socket(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     ssize_t len;
     int status;
@@ -543,7 +531,7 @@ int handle_client_socket(AppState *app, fd_set *fds, fd_set *active_fds, int *nf
 }
 
 /* TODO: check if zero is returned when a device is disconnected */
-int handle_ble_fd(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
+int handle_ble_fd(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     ssize_t len;
     char buf[app->notify_fdp->mtu];
@@ -588,7 +576,7 @@ int handle_ble_fd(AppState *app, fd_set *fds, fd_set *active_fds, int *nfds)
     return 0;
 }
 
-void run_server(AppState *app)
+void run_server(AppContext *app)
 {
     fd_set current_fds, active_fds;
     int nfds, status;
@@ -674,31 +662,13 @@ int init_sig_handlers(void)
     return 0;
 }
 
-static int g_error_handle(GError *err, const char *msg)
-{
-    const char *empty = "";
-
-    if (err == NULL)
-        return 0;
-
-    if (!msg) {
-        msg = empty;
-    }
-    
-    print_gerror("GError", err);
-    g_error_free(err);
-    err = NULL;
-
-    return -1;
-}
-
 static int create_dbus_conn(void)
 {
     GError *err = NULL;
 
     gchar *sys_bus_addr_ptr = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
     if (!sys_bus_addr_ptr) {
-        return g_error_handle(err, "D-BUS bus address resolve failed");
+        return gerror_handle(err, "D-BUS bus address resolve failed");
     }
 
     dbus_conn = g_dbus_connection_new_for_address_sync(
@@ -710,7 +680,7 @@ static int create_dbus_conn(void)
         &err
     );
     if (!dbus_conn) {
-        return g_error_handle(err, "D-BUS connection failed");
+        return gerror_handle(err, "D-BUS connection failed");
     }
 
     g_free(sys_bus_addr_ptr);
@@ -721,19 +691,18 @@ static int create_dbus_conn(void)
 void close_dbus_conn()
 {
     GError *err = NULL;
-    bool status;
+    gboolean status;
 
     status = g_dbus_connection_close_sync(dbus_conn, NULL, &err);
     g_object_unref(dbus_conn);
 
     if (!status) {
-        fprintf(stderr, "dbus error: %s\n", err->message);
         failure(NULL);
-        g_error_handle(err, NULL);
+        gerror_handle(err, NULL);
     }
 }
 
-void init_app(int argc, char *argv[]) {
+void init_app(AppContext *app, int argc, char *argv[]) {
     int status = parse_args(argc, argv);
 
     if (status == -ARG_HELP)
@@ -741,11 +710,24 @@ void init_app(int argc, char *argv[]) {
     if (status < 0)
         exit(1);
 
-    if (init_sig_handlers() || create_dbus_conn())
+    app->chr_path_info = chr_obj_path_info_create(opts.chr_path);
+    if (!app->chr_path_info) {
+        fputs("Invalid characteristic object path\n", stderr);
         exit(1);
+    }
+
+    if (init_sig_handlers()) {
+        fputs("Failed to set sighandlers\n", stderr);
+        exit(1);
+    }
+
+    if (create_dbus_conn()) {
+        fputs("D-Bus connection failed\n", stderr);
+        exit(1);
+    }
 }
 
-void before_exit(AppState *app)
+void before_exit(AppContext *app)
 {
     if (!dbus_conn)
         return;
@@ -771,7 +753,7 @@ void dbus_sig_handler(GDBusConnection *connection,
     printf("Callback triggered for iface %s\n", sender_name);
 }
 
-void test_scan_over_manager(AppState *app)
+void test_scan_over_manager(AppContext *app)
 {
     GVariant *res;
     GError *gerror = NULL;
@@ -791,7 +773,7 @@ void test_scan_over_manager(AppState *app)
     );
 
     if (!res) {
-        g_error_handle(gerror, "StartDiscovery error");
+        gerror_handle(gerror, "StartDiscovery error");
         return;
     }
 
@@ -822,7 +804,7 @@ void test_scan_over_manager(AppState *app)
     );
 
     if (!manager) {
-        g_error_handle(gerror, "Manager constructor error");
+        gerror_handle(gerror, "Manager constructor error");
         return;
     }
 
@@ -919,9 +901,7 @@ void test_scan_over_manager(AppState *app)
     // g_object_unref(hci_object);
 }
 
-#include <pthread.h>
-
-void test_scan(AppState *app)
+void scan_advertise(AppContext *app)
 {
     GVariant *res;
     GError *gerror = NULL;
@@ -958,7 +938,7 @@ void test_scan(AppState *app)
 
     res = g_dbus_connection_call_sync(
         dbus_conn,
-        bluez_bus_name,
+        DBUS_ORG_BLUEZ_BUS,
         "/org/bluez/hci0",
         "org.bluez.Adapter1",
         "StartDiscovery",
@@ -970,7 +950,7 @@ void test_scan(AppState *app)
         &gerror
     );
     if (!res) {
-        g_error_handle(gerror, "StartDiscovery error");
+        gerror_handle(gerror, "StartDiscovery error");
         return;
     }
     puts("enable discovery");
@@ -983,12 +963,78 @@ void test_scan(AppState *app)
 
 }
 
+ void handle_dbus_signal(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data
+)
+{
+    printf("Got D-Bus signal: %s \n", interface_name);
+    return;
+}
+
+int prepare_dbus_loop(AppContext *app)
+{
+    if (!app->loop_info)
+        app->loop_info->loop = g_main_loop_new(
+            NULL, /* context */
+            0 /* is_running */
+        );
+
+    pthread_create(
+        &app->loop_info->loop_thread_id, NULL/* attrs */, g_main_loop_run, (void *)loop
+    );
+}
+
+int prepare_scan(AppContext *app)
+{
+    int status = dbus_enable_signals(
+        dbus_conn, handle_dbus_signal, app->chr_path_info.dev, DBUS_SIGNAL_PROPERTIES_CHANGED
+    );
+    if (status < 0)
+        return -1;
+
+    if (prepare_dbus_loop(app) < 0)
+        return -1;
+    
+    return 0;    
+}
+
+void stop_dbus_loop(AppContext *app)
+{
+    g_main_loop_quit(app->loop_info->loop);
+}
+
+/**
+ * Scan for advertising message and monitor 
+ * signaling bit in advertising message.
+ */
+void start_scan(AppContext *app)
+{
+    if (prepare_scan(app) < 0))
+        return -1;
+
+    if (dbus_hci_start_discovery(dbus_conn, app->chr_path_info->hci) == NULL)
+        return -1;
+    
+    return 0;
+}
+
+int  stop_scan(AppContext *app)
+{
+    stop_dbus_loop();
+}
+
 int main(int argc, char *argv[])
 {
-    AppState app = {0};
+    AppContext app = {0};
 
     debug_init();
-    init_app(argc, argv);
+    init_app(&app, argc, argv);
 
     // /* TODO reconnect on start option */
     // if (ble_dev_reconnect(&app) < 0) {

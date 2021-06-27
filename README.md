@@ -16,7 +16,7 @@ with your HM-10 module.
 
 ## Compatible HM-10 firmware versions
 This tool works with HM-10 modules with firmware V5xx and V6xx and doesn't work with V7xx 
-because V7xx firmware is intended for master role. It seems that it is possible to make 
+because it is intended for master role. It seems that it is possible to make 
 V7xx work by rewriting flags of the characteristic in bluetoothd cache but it doesn't looks 
 like a reliable way.
 

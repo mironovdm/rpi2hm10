@@ -14,13 +14,11 @@ echo -n "AT+PIO20" | nc -vN localhost 9000  #Set HM-10 PIO2 to low
 Or you can use TCP sockets in your program and exchange the binary data 
 with your HM-10 module.
 
-## Important note
-This tool works with HM-10 V551 and lower version firmware and doesn't work with V710 
-firmware because of a problem with activation of notifications on HM-10, which responds 
-with error. I have not tested versions between V551 and V710.
-
-It seems that it is possible to make V710 work updating some data in bluetoothd cache 
-but it's not a reliable way.
+## Compatible HM-10 firmware versions
+This tool works with HM-10 modules with firmware V5xx and V6xx and doesn't work with V7xx 
+because V7xx firmware is intended for master role. It seems that it is possible to make 
+V7xx work by rewriting flags of the characteristic in bluetoothd cache but it doesn't looks 
+like a reliable way.
 
 ## Hardware
 This utility was developed on Raspberry Pi 3B+. But I suppose it should work 

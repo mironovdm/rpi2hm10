@@ -6,8 +6,7 @@ int debug_ena = 0;
 
 void debug_init()
 {
-    char *debug_env = getenv("RPIBLE_DEBUG");
-    if (debug_env) {
+    if (getenv("RPIBLE_DEBUG")) {
         debug_ena = 1;
     }
 }

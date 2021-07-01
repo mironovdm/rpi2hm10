@@ -1,0 +1,80 @@
+ServiceData
+===========
+
+   Type=signal  Endian=l  Flags=1  Version=1  Priority=0 Cookie=3208
+  Sender=:1.5  Path=/org/bluez/hci0/dev_11_22_33_44_55_66  Interface=org.freedesktop.DBus.Properties  Member=PropertiesChanged
+  UniqueName=:1.5
+  MESSAGE "sa{sv}as" {
+          STRING "org.bluez.Device1";
+          ARRAY "{sv}" {
+                  DICT_ENTRY "sv" {
+                          STRING "RSSI";
+                          VARIANT "n" {
+                                  INT16 -83;
+                          };
+                  };
+                  DICT_ENTRY "sv" {
+                          STRING "TxPower";
+                          VARIANT "n" {
+                                  INT16 -6;
+                          };
+                  };
+                  DICT_ENTRY "sv" {
+                          STRING "ServiceData";
+                          VARIANT "a{sv}" {
+                                  ARRAY "{sv}" {
+                                          DICT_ENTRY "sv" {
+                                                  STRING "0000b000-0000-1000-8000-00805f9b34fb";
+                                                  VARIANT "ay" {
+                                                          ARRAY "y" {
+                                                                  BYTE 48;  <---- AT+FLAG changes this value
+                                                                  BYTE 0;
+                                                                  BYTE 0;
+                                                                  BYTE 0;
+                                                          };
+                                                  };
+                                          };
+                                  };
+                          };
+                  };
+          };
+          ARRAY "s" {
+          };
+  };
+
+
+ManufacturerData
+================
+‣ Type=signal  Endian=l  Flags=1  Version=1  Priority=0 Cookie=343
+  Sender=:1.5  Path=/org/bluez/hci0/dev_11_22_33_44_55_66  Interface=org.freedesktop.DBus.Properties  Member=PropertiesChanged
+  UniqueName=:1.5
+  MESSAGE "sa{sv}as" {
+          STRING "org.bluez.Device1";
+          ARRAY "{sv}" {
+                  DICT_ENTRY "sv" {
+                          STRING "ManufacturerData";
+                          VARIANT "a{qv}" {
+                                  ARRAY "{qv}" {
+                                          DICT_ENTRY "qv" {
+                                                  UINT16 450;
+                                                  VARIANT "ay" {
+                                                          ARRAY "y" {
+                                                                  BYTE 64;
+                                                                  BYTE 1;
+                                                                  BYTE 0;
+                                                                  BYTE 0;
+                                                                  BYTE 0;
+                                                                  BYTE 0;
+                                                                  BYTE 2;
+                                                                  BYTE 26;
+                                                                  BYTE 0;
+                                                          };
+                                                  };
+                                          };
+                                  };
+                          };
+                  };
+          };
+          ARRAY "s" {
+          };
+  };

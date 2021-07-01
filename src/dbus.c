@@ -3,6 +3,8 @@
 #include <string.h>
 #include <errno.h>
 
+#include <stdio.h>
+
 #include <gio/gio.h>
 
 #include "dbus.h"
@@ -13,7 +15,9 @@
  * In: /org/bluez/hci0/dev_xx_xx/service0010/char0020
  * Out: /org/bluez/hci0/dev_xx_xx
  */
-static int _extract_path_before(const char *before_string, const char *object_path_str, const char **device_path_ptr)
+static int _extract_path_before(
+    const char *before_string, const char *object_path_str, const char **device_path_ptr
+)
 {
     char *pos = NULL;
     char *dev_path = NULL;
@@ -55,7 +59,10 @@ void gerror_print(char msg[static 1], GError *err)
     );
 }
 
-static int gerror_handle(GError *err, const char *msg)
+/**
+ * Print gerror and free.
+ */
+int gerror_handle(GError *err, const char *msg)
 {
     const char *empty = "";
 
@@ -95,38 +102,41 @@ struct chr_obj_path_info *chr_obj_path_info_create(const char *char_obj_path_str
 }
 
 unsigned dbus_enable_signals(
-    DBusConnection *conn,
+    GDBusConnection *conn,
     DbusSignalHandler func_sig_handler,
     const char *dev_obj_path,
-    char *signal_name
+    char *signal_name,
+    struct scan_cb_params *cb_params
 )
 {
     guint subscr_id = g_dbus_connection_signal_subscribe(
         conn,
-        DBUS_ORG_BLUEZ_BUS,
-        DBUS_IFACE_PROPERTIES,
-        DBUS_SIGNAL_PROPERTIES_CHANGED,
+        DBUS_UNAME_ORG_BLUEZ,
+        DBUS_OBJ_IFACE_PROPERTIES,
+        DBUS_OBJ_SIGNAL_PROPERTIES_CHANGED,
         dev_obj_path,
         NULL,
         G_DBUS_SIGNAL_FLAGS_NONE,
         func_sig_handler,
-        NULL,
+        (gpointer)cb_params,
         NULL
     );
 
     return subscr_id;
 }
 
-int _dbus_hci_discovery_call_method_sync(DBusConnection *conn, char *hci_obj_path, char *method)
+int _dbus_hci_call_method_sync(
+    GDBusConnection *conn, const char *hci_obj_path, const char *method, GVariant *params
+)
 {
     GError *gerr = NULL;
     GVariant *res = g_dbus_connection_call_sync(
         conn,
-        DBUS_ORG_BLUEZ_BUS,
-        hci_obj_path, // "/org/bluez/hci0",
-        "org.bluez.Adapter1",
+        DBUS_UNAME_ORG_BLUEZ,
+        hci_obj_path,
+        DBUS_OBJ_IFACE_ADAPTER1,
         method,
-        NULL, /* parameters= */
+        params,
         NULL, /* reply_type= */
         G_DBUS_CALL_FLAGS_NONE,
         -1, /* timeout= */
@@ -144,12 +154,29 @@ int _dbus_hci_discovery_call_method_sync(DBusConnection *conn, char *hci_obj_pat
     return 0;
 }
 
-int dbus_hci_start_discovery(DBusConnection *conn, char *hci_obj_path)
+int dbus_hci_start_discovery(GDBusConnection *conn, const char *hci_obj_path)
 {
-    return _dbus_hci_discovery_call_method_sync(conn, hci_obj_path, "StartDiscovery");
+    return _dbus_hci_call_method_sync(conn, hci_obj_path, "StartDiscovery", NULL);
 }
 
-int dbus_hci_stop_discovery(DBusConnection *conn, char *hci_obj_path)
+int dbus_hci_stop_discovery(GDBusConnection *conn, const char *hci_obj_path)
 {
-    return _dbus_hci_discovery_call_method_sync(conn, hci_obj_path, "StopDiscovery");
+    return _dbus_hci_call_method_sync(conn, hci_obj_path, "StopDiscovery", NULL);
+}
+
+int dbus_hci_set_discovery_filter(
+    GDBusConnection *conn, const char *hci_obj_path, const char *transport
+)
+{
+    GVariantBuilder builder;
+    GVariant *params_asv;
+    GVariant *params_tuple;
+
+    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&builder, "{sv}", "Transport", g_variant_new_string(transport));
+    params_asv = g_variant_builder_end(&builder);
+    params_tuple = g_variant_new_tuple(&params_asv, 1);
+
+    /* Floating params will be consumed by g_dbus_connection_call_sync */
+    return _dbus_hci_call_method_sync(conn, hci_obj_path, "SetDiscoveryFilter", params_tuple);
 }

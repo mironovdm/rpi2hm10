@@ -4,20 +4,18 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include <gio/gio.h>
-
 #include "dbus.h"
 
 
 /* Connection timeout in milliseconds */
 #define CONNECT_TIMEOUT_MS 5000
 /* Pause after unsuccessful reconnection. */
-#define RECONNECT_ATTEMPT_INTERVAL 5
-#define NOTIFY_ACQ_ATTEMPT_INTERVAL 3
+#define RECONNECT_ATTEMPT_MAX_INTERVAL 5
+#define ACQUIRE_NOTIFY_FD_ATTEMPT_MAX_INTERVAL 5
 
-struct glib_loop_info {
+struct loop_info_glib {
     GMainLoop *loop;
-    pthread_t loop_thread_id;
+    pthread_t thread_id;
 };
 
 /* Bluez 'AcquireNotify' file descriptor and MTU */
@@ -26,18 +24,30 @@ struct ble_notify_fd {
     uint16_t mtu;
 };
 
+struct ble_state {
+    bool is_connected;
+    int event_fd;
+    bool is_scaning;
+};
+
 typedef struct {
-    int ble_dev_connected;
     struct ble_notify_fd *notify_fdp;
     int server_sock;
     int client_sock;
     struct sockaddr_in *addr;
     struct chr_obj_path_info *chr_path_info;
-    struct glib_loop_info *loop_info;
+    struct loop_info_glib *loop_info;
+    guint signal_subscr_id;
+    struct ble_state *ble_state;
+    struct scan_cb_params *cb_params_ptr; /* Not thread safe */
 } AppContext;
 
-struct scan_status {
-    unsigned char signal_byte;
+typedef void *(*thread_start_routine_t)(void *);
+
+struct net_buf {
+    char *client_buf;
+    char *ble_buf;
+    int incoming_conn;
 };
 
 #endif

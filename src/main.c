@@ -1,9 +1,6 @@
 /**
  * The program establishes a connection to HM-10 module and 
  * exposes it over TCP socket.
- * 
- * TODO: connect/send/exit mode
- * 
  */
 
 #include <assert.h>
@@ -19,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>       /* For portability [M.Kerrisk p.1331] */
@@ -37,9 +35,6 @@
 
 GDBusConnection *dbus_conn;
 
-
-
-
 extern struct cmd_args opts;
 
 /* 
@@ -50,9 +45,8 @@ static int got_interp_signal = 0;
 
 static int exit_val = 0;
 
-/* Bluez DBus bus name */
-const char bluez_bus_name[] = "org.bluez";
-
+static int ble_start_scan(AppContext *app);
+static int ble_stop_scan(AppContext *app);
 
 void AppState_close_fd(AppContext *app)
 {
@@ -111,7 +105,7 @@ struct ble_notify_fd *ble_acquire_notify_fd(GError **errp)
      * to get file descriptor.
      */
     res = g_dbus_connection_call_with_unix_fd_list_sync(
-        dbus_conn, bluez_bus_name, opts.chr_path,
+        dbus_conn, DBUS_UNAME_ORG_BLUEZ, opts.chr_path,
         dbus_iface, "AcquireNotify", params, NULL, 
         G_DBUS_CALL_FLAGS_NONE, -1, NULL, &fdlist, NULL, &error
     );
@@ -182,15 +176,14 @@ int ble_write_chr(const char * const data, size_t len)
     method = "WriteValue";
     
     res = g_dbus_connection_call_sync(
-        dbus_conn, bluez_bus_name, opts.chr_path,
+        dbus_conn, DBUS_UNAME_ORG_BLUEZ, opts.chr_path,
         dbus_iface, method, params, 
         /* reply type */ NULL, G_DBUS_CALL_FLAGS_NONE, /* timeout */ -1, 
         /* cancellable */ NULL, &error
     );
 
     if (res == NULL) {
-        gerror_print("BLE write error", error);
-        g_error_free(error);
+        gerror_handle(error, "BLE write error");
         return -1;
     }
 
@@ -224,20 +217,20 @@ int ble_dev_connect(AppContext *app)
     GError *error = NULL;
 
     res = g_dbus_connection_call_sync(
-        dbus_conn, bluez_bus_name, opts.dev_path, "org.bluez.Device1",  "Connect", NULL, NULL, 
+        dbus_conn, DBUS_UNAME_ORG_BLUEZ, opts.dev_path, "org.bluez.Device1",  "Connect", NULL, NULL, 
         G_DBUS_CALL_FLAGS_NONE, CONNECT_TIMEOUT_MS, NULL, &error
     );
 
     if (res == NULL){
         gerror_print("D-Bus connect error", error);
         g_error_free(error);
-        app->ble_dev_connected = 0;
+        app->ble_state->is_connected = 0;
         return -1;
     }
 
     g_variant_unref(res);
 
-    app->ble_dev_connected = 1;
+    app->ble_state->is_connected = 1;
     printf("Device %s connected\n", opts.dev_path);
     
     return 0;
@@ -248,13 +241,25 @@ int is_gerror_disconnected(GError *err)
     return strstr(err->message, BLUEZ_ERR_NOT_CONNECTED) != NULL;
 }
 
+void sleep_progressive(int *reconnect_delay, int max_delay)
+{
+    sleep(*reconnect_delay);
+    if (*reconnect_delay < max_delay)
+        (*reconnect_delay)++;
+}
+
 int ble_dev_reconnect(AppContext *app)
 {
+    int reconnect_delay, reacquire_delay;
     puts("Reconnecting...");
 
     while (!is_interrupted()) {
+        reconnect_delay = 1;
+        reacquire_delay = 1;
+
         while (ble_dev_connect(app) < 0) {
-            sleep(RECONNECT_ATTEMPT_INTERVAL);
+            sleep_progressive(&reconnect_delay, RECONNECT_ATTEMPT_MAX_INTERVAL);
+            
             if (is_interrupted())
                 goto out;
         }
@@ -264,17 +269,17 @@ int ble_dev_reconnect(AppContext *app)
         while (!is_interrupted()) {
             GError *err = NULL;
 
-            app->notify_fdp = ble_acquire_notify_fd(&err);
-            if (app->notify_fdp)
+            if ((app->notify_fdp = ble_acquire_notify_fd(&err)))
                 goto out;
             
             if (is_gerror_disconnected(err)) {
-                app->ble_dev_connected = 0;
+                app->ble_state->is_connected = 0;
                 break;
             }
             
             debug("BLE FD acquire error");
-            sleep(NOTIFY_ACQ_ATTEMPT_INTERVAL);
+
+            sleep_progressive(&reacquire_delay, ACQUIRE_NOTIFY_FD_ATTEMPT_MAX_INTERVAL);
         };
     }
 out:
@@ -294,7 +299,7 @@ int ble_dev_disconnect(AppContext *app) {
     GError *error = NULL;
 
     res = g_dbus_connection_call_sync(
-        dbus_conn, bluez_bus_name, opts.dev_path,
+        dbus_conn, DBUS_UNAME_ORG_BLUEZ, opts.dev_path,
         "org.bluez.Device1", "Disconnect", /* parameters */ NULL, 
         /* reply_type: */ NULL, G_DBUS_CALL_FLAGS_NONE, 
         -1, NULL, &error
@@ -306,7 +311,7 @@ int ble_dev_disconnect(AppContext *app) {
         return -1;
     }
 
-    app->ble_dev_connected = 0;
+    app->ble_state->is_connected = 0;
     g_variant_unref(res);
     
     return 0;
@@ -425,19 +430,20 @@ void print_listen_report(AppContext *app) {
 
 int ble_reconnect_with_fdset_update(AppContext *app, fd_set *fds, int *nfds)
 {
-    int old_fd = app->notify_fdp->fd;
+    int old_notify_fd = app->notify_fdp->fd;
     int status;
 
     status = ble_dev_reconnect(app);
     if (status)
         return status;
     
-    FD_CLR(old_fd, fds);
-    *nfds = MAX(app->notify_fdp->fd, *nfds);
-    if (*nfds > FD_SETSIZE) {
-        failure("file descriptor larger than FD_SETSIZE");
+    FD_CLR(old_notify_fd, fds);
+
+    if (app->notify_fdp->fd > FD_SETSIZE) {
+        failure("descriptor larger than FD_SETSIZE");
         return -1;
     }
+    *nfds = MAX(app->notify_fdp->fd, *nfds);
     FD_SET(app->notify_fdp->fd, fds);
 
     return 0;
@@ -481,7 +487,6 @@ int handle_server_socket(AppContext *app, fd_set *fds, fd_set *active_fds, int *
 int handle_client_socket(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
 {
     ssize_t len;
-    int status;
     char buf[app->notify_fdp->mtu];
 
     if (!app->client_sock || !FD_ISSET(app->client_sock, fds)) {
@@ -508,30 +513,39 @@ int handle_client_socket(AppContext *app, fd_set *fds, fd_set *active_fds, int *
     /* 0 is returned if peer closed the connection. */
     if (len == 0) {
         FD_CLR(app->client_sock, active_fds);
-        *nfds = MAX(app->server_sock, app->notify_fdp->fd);
-        if (*nfds > FD_SETSIZE)
-            return -1;
         close(app->client_sock);
         app->client_sock = 0;
-        return 0;
-    } 
-    
-    if (!ble_write_chr(buf, len))
-        return 0;
 
-    fputs("BLE disconnected\n", stderr);
-    if (!opts.reconnect)
-        return -1;
-    
-    status = ble_reconnect_with_fdset_update(app, active_fds, nfds);
-    if (status)
-        return -1;
-    
+        return 0;
+    }
+
+    if (app->ble_state->is_scaning) {
+        ble_stop_scan(app);
+        if (ble_reconnect_with_fdset_update(app, active_fds, nfds))
+            return -1;
+    }
+
+    while (1) {
+        int status = ble_write_chr(buf, len);
+        if (!status)
+            break;
+        
+        /* Assume that error is returnd in case the connection is lost */
+
+        if (!opts.reconnect)
+            return -1;
+            
+        status = ble_reconnect_with_fdset_update(app, active_fds, nfds);
+        if (status)
+            return -1;
+    }
+
     return 0;
 }
 
-/* TODO: check if zero is returned when a device is disconnected */
-int handle_ble_fd(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
+int handle_ble_fd(
+    AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds, bool *notify_client_flag
+)
 {
     ssize_t len;
     char buf[app->notify_fdp->mtu];
@@ -542,7 +556,7 @@ int handle_ble_fd(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
         return 0;
     }
 
-    debug("select(): BLE FD");
+    DEBUGF("select(): BLE FD\n");
 
     len = read(app->notify_fdp->fd, buf, sizeof buf);
     if (len < 0) {
@@ -550,16 +564,21 @@ int handle_ble_fd(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
         return -1;
     }
     if (len == 0) {
-        fputs("BLE disconnected\n", stderr);
-        if (opts.reconnect) {
-            int status = ble_reconnect_with_fdset_update(app, active_fds, nfds);
-            if (status)
-                return -1;
-            return 0;
-        }
-        return -1;
+        puts("BLE FD returns 0, probably disconnected");
+        
+        app->ble_state->is_connected = false;
+        FD_CLR(app->notify_fdp->fd, active_fds);
+        close(app->notify_fdp->fd);
+        
+        DEBUGF("notify_client_flag=%d\n", *notify_client_flag);
+
+        if (*notify_client_flag == false)
+            ble_start_scan(app);
+
+        return 0;
     }
 
+     /* Nowhere to transmit the data because client still not connected */
     if (!app->client_sock) {
         return 0;
     }
@@ -569,9 +588,53 @@ int handle_ble_fd(AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds)
     /* TODO: check for partial send */
     len = send(app->client_sock, buf, len, 0);
     if (len < 0) {
-        fprintf(stderr, "Error");
+        fprintf(stderr, "Socket write error");
         return -1;
     }
+
+    return 0;
+}
+
+int notify_client(AppContext *app, bool *notify_client_flag)
+{
+    const char buf[] = "AT+WAKE";
+    int status;
+
+    if (!*notify_client_flag || !app->client_sock)
+        return 0;
+
+    status = write(app->client_sock, buf, sizeof(buf)-1);
+
+    if (!status || status < 0)
+        return -1;
+    
+    *notify_client_flag = false;
+    if (!app->ble_state->is_connected)
+        ble_start_scan(app);
+
+    return 0;
+}
+
+int handle_ble_scan_event_fd(
+    AppContext *app, fd_set *fds, fd_set *active_fds, int *nfds, bool *notif_client
+)
+{
+    uint64_t event_counter = 0;
+
+    if (!FD_ISSET(app->ble_state->event_fd, fds)) {
+        return 0;
+    }
+
+    DEBUGF("connect request found\n");
+
+    read(app->ble_state->event_fd, &event_counter, sizeof(event_counter));
+
+    ble_stop_scan(app);
+
+    if (ble_reconnect_with_fdset_update(app, active_fds, nfds))
+        return -1;
+
+    *notif_client = true;
 
     return 0;
 }
@@ -580,6 +643,7 @@ void run_server(AppContext *app)
 {
     fd_set current_fds, active_fds;
     int nfds, status;
+    bool notify_client_flag = false;
 
     status = create_noblock_srv_socket(app);
     if (status < 0) {
@@ -590,6 +654,7 @@ void run_server(AppContext *app)
     print_listen_report(app);
 
     nfds = MAX(app->server_sock, app->notify_fdp->fd);
+    nfds = MAX(nfds, app->ble_state->event_fd);
 
     if (nfds > FD_SETSIZE) {
         failure("fd is greater than FD_SETSIZE");
@@ -599,6 +664,7 @@ void run_server(AppContext *app)
     FD_ZERO(&active_fds);
     FD_SET(app->server_sock, &active_fds);
     FD_SET(app->notify_fdp->fd, &active_fds);
+    FD_SET(app->ble_state->event_fd, &active_fds);
 
     while (!is_interrupted()) {
         current_fds = active_fds;
@@ -620,8 +686,11 @@ void run_server(AppContext *app)
 
         status = handle_server_socket(app, &current_fds, &active_fds, &nfds);
         status |= handle_client_socket(app, &current_fds, &active_fds, &nfds);
-        status |= handle_ble_fd(app, &current_fds, &active_fds, &nfds);
-        
+        status |= handle_ble_fd(app, &current_fds, &active_fds, &nfds, &notify_client_flag);
+        status |= handle_ble_scan_event_fd(app, &current_fds, &active_fds, &nfds, &notify_client_flag);
+
+        status |= notify_client(app, &notify_client_flag);
+
         if (status) {
             break;
         }
@@ -725,6 +794,11 @@ void init_app(AppContext *app, int argc, char *argv[]) {
         fputs("D-Bus connection failed\n", stderr);
         exit(1);
     }
+
+    app->loop_info = calloc(1, sizeof(struct loop_info_glib));
+    app->ble_state = calloc(1, sizeof(struct ble_state));
+    app->ble_state->event_fd = eventfd(0, EFD_NONBLOCK);
+    app->ble_state->is_scaning = false;
 }
 
 void before_exit(AppContext *app)
@@ -734,10 +808,15 @@ void before_exit(AppContext *app)
 
     AppState_close_fd(app);
     
-    if (app->ble_dev_connected && !opts.keep_ble_con) {
+    if (app->ble_state->is_connected && !opts.keep_ble_con) {
         debug("BLE disconnect");
         ble_dev_disconnect(app);
     }
+
+    free(app->loop_info);
+
+    close(app->ble_state->event_fd);
+    free(app->ble_state);
 
     close_dbus_conn();
 }
@@ -753,280 +832,391 @@ void dbus_sig_handler(GDBusConnection *connection,
     printf("Callback triggered for iface %s\n", sender_name);
 }
 
-void test_scan_over_manager(AppContext *app)
-{
-    GVariant *res;
-    GError *gerror = NULL;
+// void test_scan_over_manager(AppContext *app)
+// {
+//     GVariant *res;
+//     GError *gerror = NULL;
 
-    res = g_dbus_connection_call_sync(
-        dbus_conn,
-        bluez_bus_name,
-        "/org/bluez/hci0",
-        "org.bluez.Adapter1",
-        "StartDiscovery",
-        /* parameters= */ NULL, 
-        /* reply_type= */ NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        /* timeout= */ -1, 
-        /* cancellable= */ NULL,
-        &gerror
-    );
+//     res = g_dbus_connection_call_sync(
+//         dbus_conn,
+//         bluez_bus_name,
+//         "/org/bluez/hci0",
+//         "org.bluez.Adapter1",
+//         "StartDiscovery",
+//         /* parameters= */ NULL, 
+//         /* reply_type= */ NULL,
+//         G_DBUS_CALL_FLAGS_NONE,
+//         /* timeout= */ -1, 
+//         /* cancellable= */ NULL,
+//         &gerror
+//     );
 
-    if (!res) {
-        gerror_handle(gerror, "StartDiscovery error");
-        return;
-    }
-
-
-    puts("discovery started");
-
-    const char *uniq_conn_name = g_dbus_connection_get_unique_name(dbus_conn);
-
-    if (!uniq_conn_name) {
-        puts("fuck! Didn't get name");
-        return;
-    }
-
-    if (uniq_conn_name)
-        printf("got name: %s\n", uniq_conn_name);
+//     if (!res) {
+//         gerror_handle(gerror, "StartDiscovery error");
+//         return;
+//     }
 
 
+//     puts("discovery started");
 
+//     const char *uniq_conn_name = g_dbus_connection_get_unique_name(dbus_conn);
 
-    GDBusObjectManager *manager = g_dbus_object_manager_client_new_sync(
-        dbus_conn,
-        G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
-        /* name= */ "org.bluez",
-        /* object_path= */ "/",
-        NULL, NULL, NULL,
-        /* cancelable= */ NULL,
-        &gerror
-    );
+//     if (!uniq_conn_name) {
+//         puts("fuck! Didn't get name");
+//         return;
+//     }
 
-    if (!manager) {
-        gerror_handle(gerror, "Manager constructor error");
-        return;
-    }
-
-    puts("Manager created");
+//     if (uniq_conn_name)
+//         printf("got name: %s\n", uniq_conn_name);
 
 
 
 
-    // GDBusObject *hci_object = g_dbus_object_manager_get_object(manager, "/org/bluez/hci0");
-    // if (!hci_object) {
-    //     puts("no hci0 object");
-    //     return;
-    // }
-    // puts("Got hci0 d-bus object");
+//     GDBusObjectManager *manager = g_dbus_object_manager_client_new_sync(
+//         dbus_conn,
+//         G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
+//         /* name= */ "org.bluez",
+//         /* object_path= */ "/",
+//         NULL, NULL, NULL,
+//         /* cancelable= */ NULL,
+//         &gerror
+//     );
+
+//     if (!manager) {
+//         gerror_handle(gerror, "Manager constructor error");
+//         return;
+//     }
+
+//     puts("Manager created");
 
 
 
 
-    // GList *ifaces = g_dbus_object_get_interfaces(hci_object);
-    // if (!ifaces) {
-    //     puts("no ifaces");
-    //     return;
-    // }
-
-    // for (GList *l = ifaces; l != NULL; l = l->next)
-    // {
-    //     GDBusInterface *ifaceitem = G_DBUS_INTERFACE(l->data);
-    //     GDBusInterfaceInfo *info = g_dbus_interface_get_info(ifaceitem);
-    //     if (!info)
-    //         puts("no iface info");
-    //     else
-    //         puts("got info");
-
-    //     gulong handler_id = g_signal_connect(ifaceitem, "PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
-    //     if (!handler_id) {
-    //         puts("g_signal_connect() failed, handler ID is 0");
-    //         // return;
-    //     }
-
-    //     /* Do something with @element_data. */
-    // }
-
-
-
-    /*
-        interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
-    */
+//     // GDBusObject *hci_object = g_dbus_object_manager_get_object(manager, "/org/bluez/hci0");
+//     // if (!hci_object) {
+//     //     puts("no hci0 object");
+//     //     return;
+//     // }
+//     // puts("Got hci0 d-bus object");
 
 
 
 
-    // GDBusInterface *iface = g_dbus_object_get_interface(hci_object, "org.freedesktop.DBus.Properties");
-    // if (iface == NULL) {
-    //     puts("no interface");
-    //     return;
-    // }
+//     // GList *ifaces = g_dbus_object_get_interfaces(hci_object);
+//     // if (!ifaces) {
+//     //     puts("no ifaces");
+//     //     return;
+//     // }
 
-    GDBusInterface *iface = g_dbus_object_manager_get_interface(manager, "/org/bluez/hci0", "org.freedesktop.DBus.Properties");
-    if (iface == NULL) {
-        puts("no interface");
-        return;
-    }
+//     // for (GList *l = ifaces; l != NULL; l = l->next)
+//     // {
+//     //     GDBusInterface *ifaceitem = G_DBUS_INTERFACE(l->data);
+//     //     GDBusInterfaceInfo *info = g_dbus_interface_get_info(ifaceitem);
+//     //     if (!info)
+//     //         puts("no iface info");
+//     //     else
+//     //         puts("got info");
 
-    if (!G_IS_DBUS_INTERFACE(iface)) {
-        puts("not interface");
-        return;
-    }
+//     //     gulong handler_id = g_signal_connect(ifaceitem, "PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
+//     //     if (!handler_id) {
+//     //         puts("g_signal_connect() failed, handler ID is 0");
+//     //         // return;
+//     //     }
 
-    // const char *name = g_dbus_proxy_get_interface_info (iface);
-    // if(!name) {
-    //     puts("no name");
-    //     return;
-    // }
-
-    // puts("name");
-    // puts(name);
+//     //     /* Do something with @element_data. */
+//     // }
 
 
-    GDBusInterfaceInfo *info = g_dbus_proxy_get_interface_info(iface);
-    if (!info) {
-        puts("no info");
-        // return;
-    }
 
-    gulong handler_id = g_signal_connect(iface, "::PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
-    if (!handler_id) {
-        puts("g_signal_connect() failed");
-        return;
-    }
-
-    sleep(5);
-
-    g_object_unref(iface);
-    // g_object_unref(hci_object);
-}
-
-void scan_advertise(AppContext *app)
-{
-    GVariant *res;
-    GError *gerror = NULL;
-
-    GMainLoop *loop = g_main_loop_new(NULL, 0);
-
-    const char *uniq_name = g_dbus_connection_get_unique_name(dbus_conn);
-    if (!uniq_name) {
-        puts("fuck! Didn't get name");
-        return;
-    }
-
-    guint subscr_id = g_dbus_connection_signal_subscribe(
-        dbus_conn,
-        DBUS_ORG_BLUEZ_BUS,
-        DBUS_IFACE_PROPERTIES,
-        DBUS_SIGNAL_PROPERTIES_CHANGED,
-        "/org/bluez/hci0/dev_5C_12_03_6A_24_E7",
-        NULL,
-        G_DBUS_SIGNAL_FLAGS_NONE,
-        dbus_sig_handler,
-        NULL,
-        NULL
-    );
-    printf("subscriber id %d\n", subscr_id);
+//     /*
+//         interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
+//     */
 
 
-    pthread_t thread_id;
-    pthread_create(&thread_id, NULL, (void *(*)(void *))g_main_loop_run, loop);
-
-    puts("main loop started");
-    sleep(1);
 
 
-    res = g_dbus_connection_call_sync(
-        dbus_conn,
-        DBUS_ORG_BLUEZ_BUS,
-        "/org/bluez/hci0",
-        "org.bluez.Adapter1",
-        "StartDiscovery",
-        /* parameters= */ NULL, 
-        /* reply_type= */ NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        /* timeout= */ -1, 
-        /* cancellable= */ NULL,
-        &gerror
-    );
-    if (!res) {
-        gerror_handle(gerror, "StartDiscovery error");
-        return;
-    }
-    puts("enable discovery");
+//     // GDBusInterface *iface = g_dbus_object_get_interface(hci_object, "org.freedesktop.DBus.Properties");
+//     // if (iface == NULL) {
+//     //     puts("no interface");
+//     //     return;
+//     // }
+
+//     GDBusInterface *iface = g_dbus_object_manager_get_interface(manager, "/org/bluez/hci0", "org.freedesktop.DBus.Properties");
+//     if (iface == NULL) {
+//         puts("no interface");
+//         return;
+//     }
+
+//     if (!G_IS_DBUS_INTERFACE(iface)) {
+//         puts("not interface");
+//         return;
+//     }
+
+//     // const char *name = g_dbus_proxy_get_interface_info (iface);
+//     // if(!name) {
+//     //     puts("no name");
+//     //     return;
+//     // }
+
+//     // puts("name");
+//     // puts(name);
 
 
-    sleep(7);
-    g_main_loop_quit(loop);
-    pthread_join(thread_id, NULL);
-    puts("main loop stopped");
+//     GDBusInterfaceInfo *info = g_dbus_proxy_get_interface_info(iface);
+//     if (!info) {
+//         puts("no info");
+//         // return;
+//     }
 
-}
+//     gulong handler_id = g_signal_connect(iface, "::PropertiesChanged", G_CALLBACK(dbus_sig_handler), NULL);
+//     if (!handler_id) {
+//         puts("g_signal_connect() failed");
+//         return;
+//     }
 
- void handle_dbus_signal(
+//     sleep(5);
+
+//     g_object_unref(iface);
+//     // g_object_unref(hci_object);
+// }
+
+/* TODO remove */
+// void scan_advertise(AppContext *app)
+// {
+//     GVariant *res;
+//     GError *gerror = NULL;
+
+//     GMainLoop *loop = g_main_loop_new(NULL, 0);
+
+//     const char *uniq_name = g_dbus_connection_get_unique_name(dbus_conn);
+//     if (!uniq_name) {
+//         puts("fuck! Didn't get name");
+//         return;
+//     }
+
+//     guint subscr_id = g_dbus_connection_signal_subscribe(
+//         dbus_conn,
+//         DBUS_UNAME_ORG_BLUEZ,
+//         DBUS_OBJ_IFACE_PROPERTIES,
+//         DBUS_OBJ_SIGNAL_PROPERTIES_CHANGED,
+//         "/org/bluez/hci0/dev_5C_12_03_6A_24_E7",
+//         NULL,
+//         G_DBUS_SIGNAL_FLAGS_NONE,
+//         dbus_sig_handler,
+//         NULL,
+//         NULL
+//     );
+//     printf("subscriber id %d\n", subscr_id);
+
+
+//     pthread_t thread_id;
+//     pthread_create(&thread_id, NULL, (void *(*)(void *))g_main_loop_run, loop);
+
+//     puts("main loop started");
+//     sleep(1);
+
+
+//     res = g_dbus_connection_call_sync(
+//         dbus_conn,
+//         DBUS_UNAME_ORG_BLUEZ,
+//         "/org/bluez/hci0",
+//         "org.bluez.Adapter1",
+//         "StartDiscovery",
+//         /* parameters= */ NULL, 
+//         /* reply_type= */ NULL,
+//         G_DBUS_CALL_FLAGS_NONE,
+//         /* timeout= */ -1, 
+//         /* cancellable= */ NULL,
+//         &gerror
+//     );
+//     if (!res) {
+//         gerror_handle(gerror, "StartDiscovery error");
+//         return;
+//     }
+//     puts("enable discovery");
+
+
+//     sleep(7);
+//     g_main_loop_quit(loop);
+//     pthread_join(thread_id, NULL);
+//     puts("main loop stopped");
+
+// }
+
+/**
+ * TODO: Review. Memory can leak here
+ */
+ void dbus_signal_callback(
     GDBusConnection *connection,
     const gchar *sender_name,
     const gchar *object_path,
     const gchar *interface_name,
     const gchar *signal_name,
-    GVariant *parameters,
+    GVariant *params,
     gpointer user_data
 )
 {
-    printf("Got D-Bus signal: %s \n", interface_name);
-    return;
-}
+    const char *iface;
+    unsigned char flag_byte;
+    GVariant *data = NULL;
+    GVariantIter *iter = NULL;
+    GVariant *service_data_dict = NULL;
+    GVariant *service_data_entry = NULL;
+    GVariant *service_data_entry_value = NULL;
 
-int prepare_dbus_loop(AppContext *app)
-{
-    if (!app->loop_info)
-        app->loop_info->loop = g_main_loop_new(
-            NULL, /* context */
-            0 /* is_running */
-        );
-
-    pthread_create(
-        &app->loop_info->loop_thread_id, NULL/* attrs */, g_main_loop_run, (void *)loop
+    printf(
+        "Got D-Bus signal: sender=%s, path=%s, iface=%s, signame=%s\n",
+        sender_name, object_path, interface_name, signal_name
     );
-}
 
-int prepare_scan(AppContext *app)
-{
-    int status = dbus_enable_signals(
-        dbus_conn, handle_dbus_signal, app->chr_path_info.dev, DBUS_SIGNAL_PROPERTIES_CHANGED
-    );
-    if (status < 0)
-        return -1;
+    if (!params) {
+        DEBUGF("empty params\n");
+        return;
+    }
 
-    if (prepare_dbus_loop(app) < 0)
-        return -1;
+    if (!g_variant_check_format_string(params, "(s@a{sv}as)", TRUE))
+        return;
     
-    return 0;    
+    /* Event contains string (eg "org.bluez.Device1"), dict {sv} 
+     * and a string array. See example entry in the docs.
+     * Type "@a{sv}" - returns GVariant "a{sv}", while "a{sv}"
+     * return an iterator of "{sv}" entries of a dict.
+     */
+    g_variant_get(params, "(s@a{sv}as)", &iface, &data, NULL);
+    
+    if (!iface || strcmp(iface, "org.bluez.Device1") != 0)
+        goto out;
+
+    service_data_dict = g_variant_lookup_value(data, "ServiceData", G_VARIANT_TYPE_VARDICT);
+    if (!service_data_dict)
+        goto out;
+    
+    DEBUGF("ServiceData updated\n");
+
+    /*
+     * Service data is a dict of {UUID: data}, with format "s":"ay".
+     * HM-10 has one UUID in ServiceData dict, so we need the first entry.
+     */
+    iter = g_variant_iter_new(service_data_dict);
+    service_data_entry = g_variant_iter_next_value(iter);
+
+    /* Get value of the first dict entry */
+    g_variant_get(service_data_entry, "{sv}", NULL, &service_data_entry_value);
+    g_variant_iter_free(iter);
+
+    /* Get the first byte (AT+FLAG[byte]) of the ServiceData value */
+
+    iter = g_variant_iter_new(service_data_entry_value);
+    if (!g_variant_iter_loop(iter, "y", &flag_byte))
+        goto out;
+
+    if (flag_byte != 0) {
+        /* THIS IS A REQUEST FOR CONNECTION FROM DEVICE CONNECTED TO HM-10 !!! */
+        uint64_t counter = 1;
+        struct scan_cb_params *cb_params = (struct scan_cb_params *)user_data;
+
+        write(cb_params->event_fd, &counter, sizeof(counter));
+    }
+
+    DEBUGF("flag value %hhu\n", flag_byte);
+
+out:
+    if (iface)
+        g_free((void *)iface);
+    
+    if (data)
+        g_variant_unref(data);
+
+    if (service_data_dict)
+        g_variant_unref(service_data_dict);
+
+    if (iter)
+        g_variant_iter_free(iter);
+
 }
 
-void stop_dbus_loop(AppContext *app)
+static int prepare_dbus_loop(AppContext *app)
 {
-    g_main_loop_quit(app->loop_info->loop);
+    int ret;
+
+    if (!app->loop_info->loop)
+        app->loop_info->loop = g_main_loop_new(NULL /* context */, 0 /* is_running */);
+
+    ret = pthread_create(
+        &app->loop_info->thread_id,
+        NULL/* attrs */,
+        (thread_start_routine_t)g_main_loop_run,
+        app->loop_info->loop
+    );
+    if (ret)
+        return ret;
+
+    return 0;
 }
 
-/**
- * Scan for advertising message and monitor 
- * signaling bit in advertising message.
- */
-void start_scan(AppContext *app)
+static int ble_start_scan(AppContext *app)
 {
-    if (prepare_scan(app) < 0))
+    int status;
+    struct scan_cb_params *callback_params = 0;
+
+    if (prepare_dbus_loop(app) != 0)
         return -1;
 
-    if (dbus_hci_start_discovery(dbus_conn, app->chr_path_info->hci) == NULL)
+    callback_params = malloc(sizeof(struct scan_cb_params));
+    if (!callback_params)
         return -1;
+    callback_params->event_fd = app->ble_state->event_fd;
+
+    app->signal_subscr_id = dbus_enable_signals(
+        dbus_conn,
+        dbus_signal_callback,
+        app->chr_path_info->dev,
+        DBUS_OBJ_SIGNAL_PROPERTIES_CHANGED,
+        callback_params
+    );
+
+    /* Rpi radio chip has combined Bluetooth and WiFi. I noticed
+     * that scan for BR/EDR affects WiFi performance and cause
+     * Wifi freezes, but LE only scan has less impact on WiFi.
+     * Filter will be clear automatically after StopDiscovery.
+     */
+    status = dbus_hci_set_discovery_filter(
+        dbus_conn, app->chr_path_info->hci, DISCOVERY_FILTER_TRANSPORT_LE
+    );
+    if (status != 0)
+        return -1;
+
+    if (dbus_hci_start_discovery(dbus_conn, app->chr_path_info->hci))
+        return -1;
+
+    app->ble_state->is_scaning = true;
+
+    DEBUGF("Discovery started: transport mode=LE\n");
     
     return 0;
 }
 
-int  stop_scan(AppContext *app)
+static int ble_stop_scan(AppContext *app)
 {
-    stop_dbus_loop();
+    g_dbus_connection_signal_unsubscribe(dbus_conn, app->signal_subscr_id);
+    app->signal_subscr_id = 0;
+
+    free(app->cb_params_ptr);
+
+    if (dbus_hci_stop_discovery(dbus_conn, app->chr_path_info->hci))
+        return -1;
+
+    g_main_loop_quit(app->loop_info->loop);
+    if (pthread_join(app->loop_info->thread_id, NULL /* void** return */)) {
+        failure("loop thread join failed");
+        return -1;
+    }
+    g_main_loop_unref(app->loop_info->loop);
+    *(app->loop_info) = (const struct loop_info_glib){0};
+
+    app->ble_state->is_scaning = false;
+
+    return 0;
 }
 
 int main(int argc, char *argv[])
@@ -1036,23 +1226,28 @@ int main(int argc, char *argv[])
     debug_init();
     init_app(&app, argc, argv);
 
-    // /* TODO reconnect on start option */
-    // if (ble_dev_reconnect(&app) < 0) {
-    //     failure("failed to connect to BLE device");
-    //     before_exit(&app);
-    //     return EXIT_FAILURE;
-    // }
-    // ble_after_connect(&app);
 
-    test_scan(&app);
+    // start_scan(&app, cb_params);
+    // sleep(100);
+    // stop_scan(&app);
 
-    return exit_val;
+    /* TODO reconnect on start option */
+    if (ble_dev_reconnect(&app) < 0) {
+        failure("failed to connect to BLE device");
+        before_exit(&app);
+        return EXIT_FAILURE;
+    }
+    ble_after_connect(&app);
 
-    // app.notify_fdp = ble_acquire_notify_fd(NULL);
-    // if (app.notify_fdp != NULL)
-    //     run_server(&app);
-
-    // before_exit(&app);
+    // test_scan(&app);
 
     // return exit_val;
+
+    app.notify_fdp = ble_acquire_notify_fd(NULL);
+    if (app.notify_fdp != NULL)
+        run_server(&app);
+
+    before_exit(&app);
+
+    return exit_val;
 }

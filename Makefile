@@ -1,4 +1,5 @@
-CFLAGS = -Wall --std=gnu11 -pedantic -g -O2
+CFLAGS = -Wall --std=gnu11 -pedantic -g -O2 -march=armv7-a
+#CFLAGS += -mfpu=vfp2 -mcpu=cortex-a53
 
 TARGET = rpi2hm10
 SRCDIR = src
